@@ -1,0 +1,14 @@
+# ====================  requirements.txt  =====================
+streamlit==1.33.0
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.0
+numba==0.59.1
+cmdstanpy==1.2.1
+scikit-learn==1.4.2
+matplotlib==3.9.0
+requests==2.32.3
+beautifulsoup4==4.12.3
+fake-useragent==1.5.1
+lxml==5.2.1
+selenium==4.21.0            # optional – only if Caliente fallback enabled
