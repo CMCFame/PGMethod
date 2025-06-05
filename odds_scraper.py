@@ -1,4 +1,3 @@
-# ===============  odds_scraper.py  ===========================
 """Lightweight odds fetchers with SofaScore primary source and
 Caliente.mx fallback.  Use `fetch_portfolio_odds(fixtures)` to
 get a full {match_no: {L,E,V}} mapping ready for the Toolkit.
