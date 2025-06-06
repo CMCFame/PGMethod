@@ -11,7 +11,7 @@ import odds_scraper # Nuestro módulo de scraping
 # --- Configuración de la App ---
 st.set_page_config(page_title="Progol AI-Vision Optimizer", page_icon="🤖", layout="wide")
 st.title("🤖 Progol AI-Vision Optimizer")
-st.markdown("Sube la imagen de la quiniela, la IA leerá los partidos, buscará los momios en tiempo real y optimizará el mejor portafolio.")
+st.markdown("Una herramienta de vanguardia para la optimización de portafolios Progol, con dos modos de trabajo: **Automático (IA)** y **Manual (CSV)**.")
 
 # --- CONSTANTES DE LA METODOLOGÍA ---
 PROB_ANCLA = 0.60
@@ -22,7 +22,7 @@ V_SUM_RANGE = (4.2, 5.2)
 MIN_DRAWS_PER_TICKET = 4
 MAX_DRAWS_PER_TICKET = 6
 
-# --- MÓDULO DE OCR CON OPENAI ---
+# --- MÓDULO DE OCR CON OPENAI (MÁS ROBUSTO) ---
 def get_matches_from_image_with_ocr(image_bytes, api_key):
     st.info("Contactando a la IA de Visión... por favor espera.")
     try:
@@ -37,29 +37,39 @@ def get_matches_from_image_with_ocr(image_bytes, api_key):
                         {
                             "type": "text",
                             "text": """
-                            Analiza esta imagen de una quiniela de Progol. Extrae los 14 partidos principales y los 7 de revancha.
-                            Devuelve el resultado como un único array JSON de 21 objetos.
-                            Cada objeto debe tener las claves "match_no", "home" y "away".
+                            Analiza esta imagen de una quiniela de Progol. Extrae los partidos (principales y revancha).
+                            Devuelve el resultado como un único array JSON.
+                            Cada objeto debe tener las claves "home" y "away".
                             Limpia los nombres de los equipos (ej. "A. SAUD SUB" -> "Arabia Saudita Sub-23", "E.U.A." -> "USA").
-                            No incluyas nada más en tu respuesta, solo el array JSON.
-                            Ejemplo de formato: [{"match_no": 1, "home": "Equipo A", "away": "Equipo B"}, ...]
+                            Si no puedes analizar la imagen o no encuentras los partidos, devuelve un array JSON vacío: [].
+                            Tu respuesta DEBE contener únicamente el array JSON y nada más.
                             """
                         },
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
                 }
             ],
-            max_completion_tokens=2000, # --- PARÁMETRO CORREGIDO ---
+            max_completion_tokens=2000,
         )
-        json_string = response.choices[0].message.content.strip().replace("```json", "").replace("```", "")
-        return json.loads(json_string)
+        # --- MANEJO DE ERRORES JSON MEJORADO ---
+        json_string = response.choices[0].message.content.strip()
+        
+        # Verificar que la respuesta parezca un JSON antes de intentar decodificar
+        if json_string.startswith('[') and json_string.endswith(']'):
+            # Limpiar cualquier texto extra que la IA pueda haber añadido
+            json_string = json_string.replace("```json", "").replace("```", "")
+            return json.loads(json_string)
+        else:
+            st.error("La respuesta de la IA no fue un JSON válido.")
+            st.code(json_string) # Muestra al usuario lo que la IA respondió
+            return None
+
     except Exception as e:
         st.error(f"Error con la API de OpenAI: {e}")
         return None
 
-# --- MÓDULO DE MODELADO HEURÍSTICO ---
+# --- MÓDULOS DE MODELADO Y OPTIMIZACIÓN (Sin cambios) ---
 def get_most_probable_result(row):
-    """Obtiene el resultado más probable (L, E, V) de una fila de partido."""
     probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
     return max(probs, key=probs.get)
 
@@ -68,9 +78,7 @@ def apply_draw_propensity_rule(df):
         is_close = abs(row['p_L'] - row['p_V']) < DRAW_PROPENSITY_THRESHOLD
         is_draw_favored = row['p_E'] > max(row['p_L'], row['p_V'])
         if is_close and is_draw_favored:
-            df.loc[i, 'p_E'] += 0.06
-            df.loc[i, 'p_L'] -= 0.03
-            df.loc[i, 'p_V'] -= 0.03
+            df.loc[i, 'p_E'] += 0.06; df.loc[i, 'p_L'] -= 0.03; df.loc[i, 'p_V'] -= 0.03
     return df
 
 def apply_global_regularization(df):
@@ -81,7 +89,6 @@ def apply_global_regularization(df):
     df[['p_L', 'p_E', 'p_V']] = df[['p_L', 'p_E', 'p_V']].div(df[['p_L', 'p_E', 'p_V']].sum(axis=1), axis=0)
     return df
 
-# --- MÓDULO DE OPTIMIZACIÓN (MONTECARLO Y RECOCIDO SIMULADO) ---
 @st.cache_data
 def run_montecarlo_simulation(quiniela_tuple, probabilities_tuple, num_simulations):
     quiniela_indices = np.array([{'L': 0, 'E': 1, 'V': 2}[res] for res in quiniela_tuple])
@@ -112,8 +119,7 @@ def create_initial_portfolio(df, num_quinielas):
 
 def get_neighbor_portfolio(portfolio):
     new_portfolio = [q.copy() for q in portfolio]
-    q_idx = np.random.randint(0, len(new_portfolio))
-    m_idx = np.random.randint(0, len(new_portfolio[q_idx]))
+    q_idx = np.random.randint(0, len(new_portfolio)); m_idx = np.random.randint(0, len(new_portfolio[q_idx]))
     original_quiniela = new_portfolio[q_idx].copy()
     for _ in range(10):
         new_quiniela = original_quiniela.copy()
@@ -145,53 +151,65 @@ def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, co
     return best_portfolio
 
 # --- FLUJO PRINCIPAL DE LA APP ---
-if 'matches_df' not in st.session_state: st.session_state.matches_df = None
 if 'final_df' not in st.session_state: st.session_state.final_df = None
 
-st.sidebar.header("Paso 1: Cargar Quiniela")
-uploaded_file = st.sidebar.file_uploader("Sube la imagen de la quiniela", type=["png", "jpg", "jpeg"])
-if uploaded_file:
-    st.sidebar.image(uploaded_file, caption="Quiniela Cargada")
-    if st.sidebar.button("🤖 Leer Partidos con IA (OCR)"):
-        api_key = st.secrets.get("OPENAI_API_KEY")
-        if not api_key:
-            st.sidebar.error("Configura tu 'OPENAI_API_KEY' en los secretos de Streamlit Cloud.")
-        else:
-            image_bytes = uploaded_file.getvalue()
-            with st.spinner("La IA está analizando la imagen..."):
-                extracted_matches = get_matches_from_image_with_ocr(image_bytes, api_key)
-            if extracted_matches:
-                st.session_state.matches_df = pd.DataFrame(extracted_matches)
-                st.session_state.final_df = None # Resetear el df final
-                st.success("¡Partidos extraídos!")
+st.sidebar.header("Elige tu modo de trabajo")
+
+# --- MODO AUTOMÁTICO (NUEVA ESTRUCTURA) ---
+with st.sidebar.expander("🤖 Modo Automático (IA y Scraping)", expanded=True):
+    auto_uploaded_file = st.file_uploader("Sube la imagen de la quiniela", type=["png", "jpg"], key="auto_uploader")
+    if auto_uploaded_file:
+        st.image(auto_uploaded_file, caption="Quiniela Cargada")
+        if st.button("1. Leer Partidos con IA (OCR)"):
+            api_key = st.secrets.get("OPENAI_API_KEY")
+            if not api_key:
+                st.error("Configura tu 'OPENAI_API_KEY' en los secretos de Streamlit Cloud.")
             else:
-                st.error("No se pudieron extraer los partidos.")
+                image_bytes = auto_uploaded_file.getvalue()
+                with st.spinner("La IA está analizando la imagen..."):
+                    extracted_matches = get_matches_from_image_with_ocr(image_bytes, api_key)
+                if extracted_matches:
+                    st.session_state.final_df = pd.DataFrame(extracted_matches)
+                    st.success(f"¡IA extrajo {len(st.session_state.final_df)} partidos!")
+                else:
+                    st.error("No se pudieron extraer los partidos.")
+        
+        if 'home' in st.session_state.get('final_df', pd.DataFrame()):
+             if st.button("2. Buscar Momios en Tiempo Real"):
+                all_odds = []
+                progress_bar = st.progress(0, text="Buscando momios...")
+                for i, row in st.session_state.final_df.iterrows():
+                    progress_bar.progress((i + 1) / len(st.session_state.final_df), text=f"Buscando: {row['home']} vs {row['away']}...")
+                    odds = odds_scraper.fetch_match_odds(row['home'], row['away']); all_odds.append(odds); time.sleep(0.5)
+                st.session_state.final_df['odds'] = all_odds
+                probs_df = st.session_state.final_df['odds'].apply(odds_scraper.decimal_to_prob).apply(pd.Series)
+                st.session_state.final_df = st.session_state.final_df.join(probs_df)
+                st.success("¡Búsqueda de momios completada!")
 
-if st.session_state.matches_df is not None:
-    st.header("1. Partidos Extraídos")
-    st.dataframe(st.session_state.matches_df)
-    if st.button("🌐 Buscar Momios en Tiempo Real"):
-        all_odds = []
-        progress_bar = st.progress(0, text="Iniciando búsqueda de momios...")
-        for i, row in st.session_state.matches_df.iterrows():
-            progress_bar.progress((i + 1) / len(st.session_state.matches_df), text=f"Buscando: {row['home']} vs {row['away']}...")
-            odds = odds_scraper.fetch_match_odds(row['home'], row['away'])
-            all_odds.append(odds); time.sleep(0.5)
-        st.session_state.matches_df['odds'] = all_odds
-        probs_df = st.session_state.matches_df['odds'].apply(odds_scraper.decimal_to_prob).apply(pd.Series)
-        st.session_state.final_df = st.session_state.matches_df.join(probs_df)
-        st.success("¡Búsqueda de momios completada!")
+# --- MODO MANUAL (NUEVA ESTRUCTURA) ---
+with st.sidebar.expander("✍️ Modo Manual (Subir CSV)"):
+    manual_uploaded_file = st.file_uploader("Sube tu CSV con partidos y probabilidades", type=["csv"], key="manual_uploader")
+    if manual_uploaded_file:
+        df_manual = pd.read_csv(manual_uploaded_file)
+        required_cols = ['home', 'away', 'p_L', 'p_E', 'p_V']
+        if all(col in df_manual.columns for col in required_cols):
+            st.session_state.final_df = df_manual
+            st.success("CSV cargado y listo para optimizar.")
+        else:
+            st.error(f"El CSV debe contener las columnas: {', '.join(required_cols)}")
 
+# --- PASO FINAL: MODELADO Y OPTIMIZACIÓN (COMÚN A AMBOS MODOS) ---
 if st.session_state.final_df is not None:
-    st.header("2. Momios y Probabilidades Base")
-    st.dataframe(st.session_state.final_df[['home', 'away', 'odds', 'p_L', 'p_E', 'p_V']])
-    st.header("3. Optimización del Portafolio")
+    st.header("1. Datos Listos para Optimización")
+    st.dataframe(st.session_state.final_df)
+    
+    st.header("2. Optimización del Portafolio")
     st.sidebar.header("Parámetros de Optimización")
-    num_quinielas = st.sidebar.slider("Número de quinielas", 5, 30, 15)
-    iterations = st.sidebar.select_slider("Iteraciones", options=[500, 1000, 2000, 5000], value=1000)
-    initial_temp = st.sidebar.slider("Temperatura inicial", 0.1, 1.0, 0.5, 0.05)
-    cooling_rate = st.sidebar.select_slider("Tasa de enfriamiento", options=[0.99, 0.995, 0.999], value=0.995)
-    num_simulations = st.sidebar.select_slider("Simulaciones Montecarlo", options=[1000, 2500, 5000], value=2500)
+    num_quinielas = st.sidebar.slider("Número de quinielas", 5, 30, 15, key="q_slider")
+    iterations = st.sidebar.select_slider("Iteraciones", options=[500, 1000, 2000, 5000], value=1000, key="iter_slider")
+    initial_temp = st.sidebar.slider("Temperatura inicial", 0.1, 1.0, 0.5, 0.05, key="temp_slider")
+    cooling_rate = st.sidebar.select_slider("Tasa de enfriamiento", options=[0.99, 0.995, 0.999], value=0.995, key="cool_slider")
+    num_simulations = st.sidebar.select_slider("Simulaciones Montecarlo", options=[1000, 2500, 5000], value=2500, key="sim_slider")
 
     if st.button("🔥 Iniciar Optimización Avanzada", type="primary"):
         with st.spinner("Aplicando reglas de modelado heurístico..."):
@@ -203,7 +221,7 @@ if st.session_state.final_df is not None:
 
         final_portfolio = run_simulated_annealing(df_modelado, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations)
         
-        st.header("4. Portafolio Óptimo Encontrado")
+        st.header("3. Portafolio Óptimo Encontrado")
         probabilities_tuple = tuple(map(tuple, df_modelado[['p_L', 'p_E', 'p_V']].values))
         final_probs = [run_montecarlo_simulation(tuple(q), probabilities_tuple, num_simulations * 2) for q in final_portfolio]
         
