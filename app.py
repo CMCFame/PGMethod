@@ -5,9 +5,9 @@ import base64
 import json
 import time
 import math
-import re # Importamos la librería de expresiones regulares
+import re
 from openai import OpenAI
-import odds_scraper # Nuestro módulo de scraping
+import odds_scraper
 
 # --- Configuración de la App ---
 st.set_page_config(page_title="Progol AI-Vision Optimizer", page_icon="🤖", layout="wide")
@@ -23,68 +23,62 @@ V_SUM_RANGE = (4.2, 5.2)
 MIN_DRAWS_PER_TICKET = 4
 MAX_DRAWS_PER_TICKET = 6
 
-# --- MÓDULO DE OCR CON OPENAI (LÓGICA MEJORADA) ---
-def get_matches_from_image_with_ocr(image_bytes, api_key):
+# --- MÓDULO DE OCR CON OPENAI (CON DEPURACIÓN) ---
+def get_matches_from_image_with_ocr(image_bytes, api_key, debug_mode=False):
     st.info("Contactando a la IA de Visión... por favor espera.")
     try:
         client = OpenAI(api_key=api_key)
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        prompt_text = """
+        Analiza la imagen de la quiniela Progol. Extrae los 21 partidos (14 regulares + 7 revancha).
+        Devuelve un único array JSON que contenga 21 objetos.
+        Cada objeto DEBE tener dos claves: "home" y "away".
+        Limpia los nombres de los equipos (ej. "A. SAUD SUB" se convierte en "Arabia Saudita Sub-23").
+        Si la imagen es ilegible o no encuentras los partidos, DEBES devolver un array JSON vacío: [].
+        No añadas ningún texto antes o después del array JSON. Toda tu respuesta debe ser el propio JSON.
+        """
         
-        # --- PROMPT MEJORADO Y MÁS ESTRICTO ---
         response = client.chat.completions.create(
             model="o4-mini-2025-04-16",
             messages=[
-                {
-                    "role": "system",
-                    "content": "Eres una API de extracción de datos. Tu único propósito es analizar imágenes y devolver un objeto JSON estructurado. Nunca incluyes texto conversacional, disculpas o explicaciones. Tu respuesta es siempre y únicamente un JSON válido."
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": """
-                            Analiza la imagen de la quiniela Progol. Extrae los 21 partidos (14 regulares + 7 revancha).
-                            Devuelve un único array JSON que contenga 21 objetos.
-                            Cada objeto DEBE tener dos claves: "home" y "away".
-                            Limpia los nombres de los equipos (ej. "A. SAUD SUB" se convierte en "Arabia Saudita Sub-23").
-                            Si la imagen es ilegible o no encuentras los partidos, DEBES devolver un array JSON vacío: [].
-                            No añadas ningún texto antes o después del array JSON. Toda tu respuesta debe ser el propio JSON.
-                            """
-                        },
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
+                {"role": "system", "content": "Eres una API de extracción de datos. Tu único propósito es analizar imágenes y devolver un objeto JSON estructurado. Nunca incluyes texto conversacional, disculpas o explicaciones. Tu respuesta es siempre y únicamente un JSON válido."},
+                {"role": "user", "content": [{"type": "text", "text": prompt_text}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}
             ],
             max_completion_tokens=2000,
         )
         
-        # --- EXTRACCIÓN DE JSON MÁS ROBUSTA ---
         raw_response = response.choices[0].message.content.strip()
+
+        # --- MODO DE DEPURACIÓN ---
+        if debug_mode:
+            with st.expander("🐞 Información de Depuración de OCR"):
+                st.write("**Prompt Enviado a la IA:**")
+                st.text(prompt_text)
+                st.write("**Respuesta Cruda Recibida de la IA:**")
+                st.text(raw_response)
+
+        # --- EXTRACCIÓN DE JSON MÁS ROBUSTA ---
+        start = raw_response.find('[')
+        end = raw_response.rfind(']')
         
-        # Usamos una expresión regular para encontrar el array JSON dentro del texto
-        json_match = re.search(r'\[.*\]', raw_response, re.DOTALL)
-        
-        if json_match:
-            json_string = json_match.group(0)
+        if start != -1 and end != -1 and end > start:
+            json_string = raw_response[start:end+1]
             try:
-                # Intentamos decodificar el JSON encontrado
                 return json.loads(json_string)
             except json.JSONDecodeError as e:
-                st.error(f"Se encontró un texto JSON pero no se pudo decodificar: {e}")
-                st.code(json_string) # Muestra el JSON problemático
+                st.error(f"Error al decodificar el JSON extraído: {e}")
+                st.code(json_string)
                 return None
         else:
-            st.error("La IA no devolvió un array JSON en su respuesta.")
-            st.code(raw_response) # Muestra la respuesta completa de la IA
+            st.error("La IA no devolvió un array JSON (`[...]`) en su respuesta.")
+            if not debug_mode: st.code(raw_response)
             return None
 
     except Exception as e:
         st.error(f"Error con la API de OpenAI: {e}")
         return None
 
-
-# --- MÓDULOS DE MODELADO Y OPTIMIZACIÓN (Sin cambios) ---
+# --- MÓDULOS DE MODELADO Y OPTIMIZACIÓN ---
 def get_most_probable_result(row):
     probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
     return max(probs, key=probs.get)
@@ -123,13 +117,11 @@ def is_valid_quiniela(quiniela):
     return MIN_DRAWS_PER_TICKET <= draws <= MAX_DRAWS_PER_TICKET
 
 def create_initial_portfolio(df, num_quinielas):
-    portfolio = []
-    base_results = df['result'].tolist()
+    portfolio = []; base_results = df['result'].tolist()
     for _ in range(num_quinielas):
         quiniela = base_results.copy()
         while not is_valid_quiniela(quiniela):
-            idx_to_change = np.random.randint(0, len(quiniela))
-            quiniela[idx_to_change] = np.random.choice(['L', 'E', 'V'])
+            idx_to_change = np.random.randint(0, len(quiniela)); quiniela[idx_to_change] = np.random.choice(['L', 'E', 'V'])
         portfolio.append(quiniela)
     return portfolio
 
@@ -139,19 +131,16 @@ def get_neighbor_portfolio(portfolio):
     original_quiniela = new_portfolio[q_idx].copy()
     for _ in range(10):
         new_quiniela = original_quiniela.copy()
-        options = ['L', 'E', 'V']; options.remove(new_quiniela[m_idx])
-        new_quiniela[m_idx] = np.random.choice(options)
+        options = ['L', 'E', 'V']; options.remove(new_quiniela[m_idx]); new_quiniela[m_idx] = np.random.choice(options)
         if is_valid_quiniela(new_quiniela):
-            new_portfolio[q_idx] = new_quiniela
-            return new_portfolio
+            new_portfolio[q_idx] = new_quiniela; return new_portfolio
     return portfolio
 
 def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations):
     probabilities_tuple = tuple(map(tuple, df[['p_L', 'p_E', 'p_V']].values))
     current_portfolio = create_initial_portfolio(df, num_quinielas)
     current_energy = calculate_portfolio_objective(current_portfolio, probabilities_tuple, num_simulations)
-    best_portfolio, best_energy = current_portfolio, current_energy
-    temp = initial_temp
+    best_portfolio, best_energy = current_portfolio, current_energy; temp = initial_temp
     progress_bar = st.progress(0, text="Iniciando optimización...")
     for i in range(iterations):
         neighbor_portfolio = get_neighbor_portfolio(current_portfolio)
@@ -175,21 +164,19 @@ st.sidebar.header("Elige tu modo de trabajo")
 # --- MODO AUTOMÁTICO ---
 with st.sidebar.expander("🤖 Modo Automático (IA y Scraping)", expanded=True):
     auto_uploaded_file = st.file_uploader("1. Sube la imagen de la quiniela", type=["png", "jpg"], key="auto_uploader")
+    debug_mode = st.checkbox("Activar modo de depuración (debug)", key="debug_check")
     if auto_uploaded_file:
         if st.button("2. Leer Partidos con IA (OCR)", key="ocr_button"):
             api_key = st.secrets.get("OPENAI_API_KEY")
-            if not api_key:
-                st.error("Configura tu 'OPENAI_API_KEY' en los secretos de Streamlit Cloud.")
+            if not api_key: st.error("Configura tu 'OPENAI_API_KEY' en los secretos de Streamlit Cloud.")
             else:
                 image_bytes = auto_uploaded_file.getvalue()
                 with st.spinner("La IA está analizando la imagen..."):
-                    extracted_matches = get_matches_from_image_with_ocr(image_bytes, api_key)
+                    extracted_matches = get_matches_from_image_with_ocr(image_bytes, api_key, debug_mode)
                 if extracted_matches:
                     st.session_state.matches_df = pd.DataFrame(extracted_matches)
-                    st.session_state.final_df = None
-                    st.success(f"¡IA extrajo {len(st.session_state.matches_df)} partidos!")
-                else:
-                    st.error("No se pudieron extraer los partidos.")
+                    st.session_state.final_df = None; st.success(f"¡IA extrajo {len(st.session_state.matches_df)} partidos!")
+                else: st.error("No se pudieron extraer los partidos.")
 
     if isinstance(st.session_state.get('matches_df'), pd.DataFrame) and not st.session_state.matches_df.empty:
         if st.button("3. Buscar Momios en Tiempo Real", key="scrape_button"):
@@ -197,14 +184,10 @@ with st.sidebar.expander("🤖 Modo Automático (IA y Scraping)", expanded=True)
             progress_bar = st.progress(0, text="Buscando momios...")
             for i, row in st.session_state.matches_df.iterrows():
                 progress_bar.progress((i + 1) / len(st.session_state.matches_df), text=f"Buscando: {row['home']} vs {row['away']}...")
-                odds = odds_scraper.fetch_match_odds(row['home'], row['away'])
-                all_odds.append(odds); time.sleep(0.5)
-            
-            temp_df = st.session_state.matches_df.copy()
-            temp_df['odds'] = all_odds
+                odds = odds_scraper.fetch_match_odds(row['home'], row['away']); all_odds.append(odds); time.sleep(0.5)
+            temp_df = st.session_state.matches_df.copy(); temp_df['odds'] = all_odds
             probs_df = temp_df['odds'].apply(odds_scraper.decimal_to_prob).apply(pd.Series)
-            st.session_state.final_df = temp_df.join(probs_df)
-            st.success("¡Búsqueda de momios completada!")
+            st.session_state.final_df = temp_df.join(probs_df); st.success("¡Búsqueda de momios completada!")
 
 # --- MODO MANUAL ---
 with st.sidebar.expander("✍️ Modo Manual (Subir CSV)"):
@@ -213,16 +196,13 @@ with st.sidebar.expander("✍️ Modo Manual (Subir CSV)"):
         df_manual = pd.read_csv(manual_uploaded_file)
         required_cols = ['home', 'away', 'p_L', 'p_E', 'p_V']
         if all(col in df_manual.columns for col in df_manual.columns):
-            st.session_state.final_df = df_manual
-            st.success("CSV cargado y listo para optimizar.")
-        else:
-            st.error(f"El CSV debe contener las columnas: {', '.join(required_cols)}")
+            st.session_state.final_df = df_manual; st.success("CSV cargado y listo para optimizar.")
+        else: st.error(f"El CSV debe contener las columnas: {', '.join(required_cols)}")
 
-# --- PASO FINAL: OPTIMIZACIÓN (COMÚN A AMBOS MODOS) ---
+# --- PASO FINAL: OPTIMIZACIÓN ---
 if isinstance(st.session_state.get('final_df'), pd.DataFrame) and not st.session_state.final_df.empty:
     st.header("1. Datos Listos para Optimización")
     st.dataframe(st.session_state.final_df)
-    
     st.header("2. Optimización del Portafolio")
     st.sidebar.header("Parámetros de Optimización")
     num_quinielas = st.sidebar.slider("Número de quinielas", 5, 30, 15, key="q_slider")
