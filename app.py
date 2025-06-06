@@ -1,221 +1,235 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import math
 import time
 
 # --- App Configuration ---
-st.set_page_config(
-    page_title="Optimizador Progol",
-    page_icon="⚽",
-    layout="wide"
-)
+st.set_page_config(page_title="Optimizador Progol Avanzado", page_icon="🔬", layout="wide")
 
-# --- Constants and Rules ---
+# --- Constants from Methodology ---
+# Probabilities for match classification
 PROB_ANCLA = 0.60
 PROB_DIVISOR_MIN = 0.40
+# Draw propensity rule values 
+DRAW_PROPENSITY_THRESHOLD = 0.08
+# Historical distribution constraints 
+L_SUM_RANGE = (5.0, 5.8)
+E_SUM_RANGE = (3.5, 4.6)
+V_SUM_RANGE = (4.2, 5.2)
+# Portfolio constraints 
+MIN_DRAWS_PER_TICKET = 4
+MAX_DRAWS_PER_TICKET = 6
 
-# --- Helper Functions ---
 
-def classify_matches(df):
-    conditions = [
-        df['p_max'] >= PROB_ANCLA,
-        (df['p_max'] >= PROB_DIVISOR_MIN) & (df['p_max'] < PROB_ANCLA)
-    ]
-    choices = ['Ancla', 'Divisor']
-    df['classification'] = np.select(conditions, choices, default='Neutro')
+# --- Advanced Modeling Layer ---
+
+def apply_draw_propensity_rule(df):
+    """Aplica la regla para ajustar la probabilidad de empates en partidos cerrados. """
+    for i, row in df.iterrows():
+        is_close = abs(row['p_L'] - row['p_V']) < DRAW_PROPENSITY_THRESHOLD
+        is_draw_favored = row['p_E'] > max(row['p_L'], row['p_V'])
+        if is_close and is_draw_favored:
+            df.loc[i, 'p_E'] += 0.06
+            df.loc[i, 'p_L'] -= 0.03
+            df.loc[i, 'p_V'] -= 0.03
     return df
 
-def get_most_probable_result(row):
-    probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
-    return max(probs, key=probs.get)
+def apply_global_regularization(df):
+    """Ajusta las probabilidades de toda la quiniela para que se alineen con los rangos históricos. """
+    # Esta es una implementación simplificada del concepto de proyección al simplex.
+    for col, (min_val, max_val) in zip(['p_L', 'p_E', 'p_V'], [L_SUM_RANGE, E_SUM_RANGE, V_SUM_RANGE]):
+        col_sum = df[col].sum()
+        if col_sum < min_val:
+            df[col] *= (min_val / col_sum)
+        elif col_sum > max_val:
+            df[col] *= (max_val / col_sum)
+    # Re-normalizar para que cada fila sume 1
+    df[['p_L', 'p_E', 'p_V']] = df[['p_L', 'p_E', 'p_V']].div(df[['p_L', 'p_E', 'p_V']].sum(axis=1), axis=0)
+    return df
 
-def get_second_most_probable_result(row):
-    probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
-    sorted_probs = sorted(probs.items(), key=lambda item: item[1], reverse=True)
-    return sorted_probs[1][0]
+# --- Monte Carlo & Objective Function ---
 
-# --- CORE NEW FUNCTIONS ---
-
-def run_montecarlo_simulation(quiniela, probabilities, num_simulations):
-    """
-    Calcula la probabilidad de >= 11 aciertos para una quiniela dada.
-    Referencia: Documento, Parte 4, "Distribución de hits para Q".
-    """
-    # Convertimos la quiniela (L,E,V) a números (0,1,2) para procesar con numpy
+@st.cache_data
+def run_montecarlo_simulation(quiniela, probabilities, num_simulations=10000):
+    """Calcula Pr[>=11] para una quiniela. """
     quiniela_indices = np.array([{'L': 0, 'E': 1, 'V': 2}[res] for res in quiniela])
-    
-    # Creamos una matriz de resultados aleatorios basados en las probabilidades
-    # Cada fila es una simulación, cada columna es un partido
-    num_matches = len(probabilities)
-    choices = [0, 1, 2] # L, E, V
-    
-    # Generamos los resultados de todas las simulaciones de una sola vez
-    random_outcomes = np.array([
-        np.random.choice(choices, size=num_simulations, p=prob_row)
-        for prob_row in probabilities
-    ]).T # Transponemos para que las filas sean las simulaciones
-
-    # Comparamos los resultados simulados con nuestra quiniela para contar los aciertos
+    random_outcomes = np.array([np.random.choice(3, size=num_simulations, p=p_row) for p_row in probabilities]).T
     hits = np.sum(random_outcomes == quiniela_indices, axis=1)
-    
-    # Calculamos la probabilidad de tener 11 o más aciertos
-    prob_11_or_more = np.sum(hits >= 11) / num_simulations
-    
-    return prob_11_or_more
+    return np.sum(hits >= 11) / num_simulations
 
-def generate_candidate_quinielas(base_quiniela, df, num_candidates=50):
-    """
-    Genera una lista de quinielas candidatas para el optimizador.
-    Se basa en cambiar 1, 2 o 3 resultados de los partidos más inciertos.
-    """
-    candidates = []
-    uncertain_indices = df[df['classification'] != 'Ancla'].index.tolist()
-    if not uncertain_indices:
-        uncertain_indices = df.index.tolist()
-
-    for _ in range(num_candidates):
-        candidate = base_quiniela.copy()
-        num_flips = np.random.randint(1, 4) # Cambiar de 1 a 3 partidos
-        
-        indices_to_flip = np.random.choice(uncertain_indices, size=num_flips, replace=False)
-        
-        for index in indices_to_flip:
-            # Cambia al segundo más probable para diversificar
-            candidate[index] = get_second_most_probable_result(df.loc[index])
-        
-        candidates.append(candidate)
-    return candidates
-
-def get_portfolio_diversity(quiniela, portfolio):
-    """
-    Calcula qué tan diferente es una quiniela del portafolio existente.
-    Una mayor puntuación significa mayor diversidad.
-    """
+def calculate_portfolio_objective(portfolio, probabilities, _num_simulations):
+    """Calcula el valor de la función objetivo F del portafolio. """
     if not portfolio:
         return 0
+    # Usamos una caché para no recalcular repetidamente
+    probs_win = [run_montecarlo_simulation(tuple(q), probabilities, _num_simulations) for q in portfolio]
+    if any(p > 1 for p in probs_win): return 0 # sanity check
     
-    quiniela_arr = np.array(quiniela)
-    total_diff = 0
-    for existing_q in portfolio:
-        total_diff += np.sum(quiniela_arr != np.array(existing_q))
+    return 1 - np.prod([(1 - p) for p in probs_win])
+
+# --- Simulated Annealing Optimizer ---
+
+def is_valid_quiniela(quiniela):
+    """Verifica si una quiniela cumple las restricciones básicas. """
+    draws = quiniela.count('E')
+    return MIN_DRAWS_PER_TICKET <= draws <= MAX_DRAWS_PER_TICKET
+
+def create_initial_portfolio(df, num_quinielas):
+    """Crea un portafolio inicial válido y aleatorio."""
+    portfolio = []
+    base_results = df['result'].tolist()
+    for _ in range(num_quinielas):
+        quiniela = base_results.copy()
+        while not is_valid_quiniela(quiniela):
+            idx_to_change = np.random.randint(0, len(quiniela))
+            quiniela[idx_to_change] = np.random.choice(['L', 'E', 'V'])
+        portfolio.append(quiniela)
+    return portfolio
+    
+def get_neighbor_portfolio(portfolio, df):
+    """Crea una versión ligeramente modificada (vecina) del portafolio."""
+    new_portfolio = [q.copy() for q in portfolio]
+    # Elige una quiniela y un partido al azar para cambiar
+    q_idx = np.random.randint(0, len(new_portfolio))
+    m_idx = np.random.randint(0, len(new_portfolio[q_idx]))
+    
+    original_quiniela = new_portfolio[q_idx].copy()
+    
+    # Intenta hacer un cambio válido
+    for _ in range(10): # Try 10 times to find a valid mutation
+        new_quiniela = original_quiniela.copy()
+        # Cambia el resultado a uno diferente
+        options = ['L', 'E', 'V']
+        options.remove(new_quiniela[m_idx])
+        new_quiniela[m_idx] = np.random.choice(options)
         
-    return total_diff / len(portfolio)
+        if is_valid_quiniela(new_quiniela):
+            new_portfolio[q_idx] = new_quiniela
+            return new_portfolio
+            
+    return portfolio # Return original if no valid neighbor found
 
-
-def generate_optimized_portfolio(df, num_quinielas, num_simulations, diversity_weight):
+def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations):
     """
-    Función principal de optimización.
-    Construye el portafolio seleccionando iterativamente la mejor quiniela
-    basado en una puntuación que combina Pr[≥11] y diversidad.
+    Motor de optimización principal.
+    Referencia: Conceptos de GRASP-Annealing del documento. 
     """
     probabilities = df[['p_L', 'p_E', 'p_V']].values
     
-    # 1. Empezamos con la quiniela más probable como "Core"
-    base_quiniela = [get_most_probable_result(row) for _, row in df.iterrows()]
-    portfolio = [base_quiniela]
-    portfolio_probs = [run_montecarlo_simulation(base_quiniela, probabilities, num_simulations)]
-
-    # Barra de progreso
+    current_portfolio = create_initial_portfolio(df, num_quinielas)
+    current_energy = calculate_portfolio_objective(current_portfolio, probabilities, num_simulations)
+    
+    best_portfolio = current_portfolio
+    best_energy = current_energy
+    
+    temp = initial_temp
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    # 2. Iteramos para generar el resto del portafolio (los "Satélites")
-    for i in range(1, num_quinielas):
-        status_text.text(f"Optimizando Quiniela {i+1}/{num_quinielas}...")
+    for i in range(iterations):
+        # Genera un vecino
+        neighbor_portfolio = get_neighbor_portfolio(current_portfolio, df)
+        neighbor_energy = calculate_portfolio_objective(neighbor_portfolio, probabilities, num_simulations)
         
-        # Generamos un set de candidatos
-        candidates = generate_candidate_quinielas(base_quiniela, df, num_candidates=100)
-        
-        best_candidate = None
-        best_score = -1
-
-        # Evaluamos cada candidato
-        for candidate in candidates:
-            prob_win = run_montecarlo_simulation(candidate, probabilities, num_simulations)
-            diversity = get_portfolio_diversity(candidate, portfolio)
+        # Decide si acepta el vecino
+        delta_energy = neighbor_energy - current_energy
+        if delta_energy > 0 or np.random.rand() < math.exp(delta_energy / temp):
+            current_portfolio = neighbor_portfolio
+            current_energy = neighbor_energy
             
-            # Puntuación combinada: el corazón del optimizador
-            score = (prob_win * (1 - diversity_weight)) + (diversity * diversity_weight / 10) # Se escala la diversidad
-
-            if score > best_score:
-                best_score = score
-                best_candidate = candidate
-                best_prob_win = prob_win
+        # Actualiza el mejor encontrado hasta ahora
+        if current_energy > best_energy:
+            best_portfolio = current_portfolio
+            best_energy = current_energy
+            
+        # Enfría la temperatura
+        temp *= cooling_rate
         
-        portfolio.append(best_candidate)
-        portfolio_probs.append(best_prob_win)
-        progress_bar.progress((i + 1) / num_quinielas)
-
+        status_text.text(f"Iteración {i+1}/{iterations} | Temp: {temp:.4f} | Mejor Score: {best_energy:.4f}")
+        progress_bar.progress((i + 1) / iterations)
+    
     status_text.text("¡Optimización completada!")
-    return portfolio, portfolio_probs
-
+    return best_portfolio
 
 # --- Main App UI ---
-st.title("⚽ Optimizador de Portafolios Progol")
-st.markdown("Esta versión utiliza **simulaciones de Montecarlo** y un **optimizador de portafolio** para generar quinielas diversificadas que buscan maximizar la probabilidad de obtener premios.")
+
+st.title("🔬 Optimizador Progol Avanzado (Paradigm Breaker Edition)")
 
 # --- Sidebar Controls ---
 st.sidebar.header("Parámetros de Optimización")
-num_quinielas = st.sidebar.slider("Número total de quinielas a generar", 5, 30, 10)
-num_simulations = st.sidebar.select_slider(
-    "Número de simulaciones (más es más preciso pero lento)",
-    options=[1_000, 5_000, 10_000, 20_000],
-    value=5_000
-)
-diversity_weight = st.sidebar.slider(
-    "Peso de la Diversificación (0=solo probabilidad, 1=solo diversidad)",
-    0.0, 1.0, 0.3, 0.05
-)
+num_quinielas = st.sidebar.slider("Número de quinielas en el portafolio", 5, 30, 15)
+st.sidebar.subheader("Recocido Simulado")
+iterations = st.sidebar.select_slider("Iteraciones del optimizador", options=[500, 1000, 2000, 5000], value=1000)
+initial_temp = st.sidebar.slider("Temperatura inicial", 0.1, 1.0, 0.5, 0.05)
+cooling_rate = st.sidebar.select_slider("Tasa de enfriamiento", options=[0.99, 0.995, 0.999], value=0.995)
+num_simulations = st.sidebar.select_slider("Simulaciones Montecarlo", options=[1000, 2500, 5000], value=2500)
 
 # --- File Uploader ---
 st.sidebar.header("Datos de Entrada")
-uploaded_file = st.sidebar.file_uploader("Sube tu archivo quiniela.csv", type="csv")
+uploaded_file = st.sidebar.file_uploader("Sube tu archivo quiniela.csv (con p_L, p_E, p_V)", type="csv")
 
 if uploaded_file is None:
-    st.info("Sube tu archivo `quiniela.csv` y configura los parámetros para comenzar.")
+    st.info("Sube tu archivo `quiniela.csv` para comenzar la optimización.")
     st.stop()
 
 # --- Main Logic ---
 try:
     df = pd.read_csv(uploaded_file)
-    df['p_max'] = df[['p_L', 'p_E', 'p_V']].max(axis=1)
-    df = classify_matches(df)
     
-    st.header("Análisis de Partidos")
-    st.dataframe(df[['home', 'away', 'p_L', 'p_E', 'p_V', 'classification']])
+    st.header("1. Probabilidades Iniciales")
+    st.dataframe(df[['home', 'away', 'p_L', 'p_E', 'p_V']])
 
-    if st.button("🚀 Optimizar Portafolio", type="primary"):
-        with st.spinner("Ejecutando simulaciones de Montecarlo... Esto puede tardar unos minutos."):
-            start_time = time.time()
-            portfolio, portfolio_probs = generate_optimized_portfolio(df, num_quinielas, num_simulations, diversity_weight)
-            end_time = time.time()
+    # --- Pre-procesamiento y modelado ---
+    st.header("2. Modelado Heurístico y Regularización")
+    with st.spinner("Aplicando reglas de la metodología..."):
+        # Normalizar por si acaso
+        df[['p_L', 'p_E', 'p_V']] = df[['p_L', 'p_E', 'p_V']].div(df[['p_L', 'p_E', 'p_V']].sum(axis=1), axis=0)
+        # Aplicar reglas
+        df_modelado = apply_draw_propensity_rule(df.copy())
+        df_modelado = apply_global_regularization(df_modelado)
+        df_modelado['result'] = df_modelado.apply(lambda row: max({'L':row['p_L'], 'E':row['p_E'], 'V':row['p_V']}, key=lambda k: k), axis=1)
 
-        st.success(f"Portafolio optimizado en {end_time - start_time:.2f} segundos.")
+    st.write("Probabilidades ajustadas según la propensión al empate y los rangos históricos.")
+    st.dataframe(df_modelado[['home', 'away', 'p_L', 'p_E', 'p_V']])
+
+    # --- Optimización ---
+    st.header("3. Optimización del Portafolio")
+    if st.button("🔥 Iniciar Optimización Avanzada", type="primary"):
+        with st.spinner("Ejecutando Recocido Simulado... Este proceso es intensivo y puede tardar varios minutos."):
+            final_portfolio = run_simulated_annealing(df_modelado, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations)
         
+        st.success("Optimización finalizada.")
+
         # --- Display Results ---
-        match_names = df.apply(lambda row: f"{row['home']} vs {row['away']}", axis=1).tolist()
+        st.header("4. Portafolio Óptimo Encontrado")
+        probabilities = df_modelado[['p_L', 'p_E', 'p_V']].values.tolist()
+        # Convertir tuplas de probabilidades a listas para la caché
+        probabilities_tuple = tuple(map(tuple, probabilities))
+
+        # Recalcular probabilidades para el portafolio final
+        final_probs = [run_montecarlo_simulation(tuple(q), probabilities_tuple, num_simulations * 2) for q in final_portfolio]
+        
+        match_names = df_modelado.apply(lambda row: f"{row['home']} vs {row['away']}", axis=1).tolist()
         quiniela_names = [f"Quiniela {i+1}" for i in range(num_quinielas)]
         
-        portfolio_dict = {name: data for name, data in zip(quiniela_names, portfolio)}
+        portfolio_dict = {name: data for name, data in zip(quiniela_names, final_portfolio)}
         portfolio_df = pd.DataFrame(portfolio_dict, index=match_names)
         
-        # Añadimos la fila con la probabilidad de ganar
-        prob_series = pd.Series({name: f"{prob:.2%}" for name, prob in zip(quiniela_names, portfolio_probs)}, name="Pr[≥11]")
+        prob_series = pd.Series({name: f"{prob:.2%}" for name, prob in zip(quiniela_names, final_probs)}, name="Pr[≥11]")
+        portfolio_df.loc["**Pr[≥11]**"] = prob_series
         
-        # Usamos .loc para añadir la fila de forma segura
-        portfolio_df.loc["Pr[≥11]"] = prob_series
-        
-        st.header("✅ Portafolio Optimizado")
         st.dataframe(portfolio_df)
         
         csv_output = portfolio_df.to_csv().encode('utf-8')
         st.download_button(
-            label="📥 Descargar Portafolio en CSV",
+            label="📥 Descargar Portafolio Óptimo",
             data=csv_output,
-            file_name="portafolio_optimizado_progol.csv",
+            file_name="portafolio_optimizado_pro.csv",
             mime="text/csv",
         )
 
 except Exception as e:
-    st.error(f"Ha ocurrido un error al procesar el archivo: {e}")
+    st.error(f"Ha ocurrido un error: {e}")
     st.exception(e)
