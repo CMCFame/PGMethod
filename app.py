@@ -58,6 +58,11 @@ def get_matches_from_image_with_ocr(image_bytes, api_key):
         return None
 
 # --- MÓDULO DE MODELADO HEURÍSTICO ---
+def get_most_probable_result(row):
+    """Obtiene el resultado más probable (L, E, V) de una fila de partido."""
+    probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
+    return max(probs, key=probs.get)
+
 def apply_draw_propensity_rule(df):
     for i, row in df.iterrows():
         is_close = abs(row['p_L'] - row['p_V']) < DRAW_PROPENSITY_THRESHOLD
@@ -85,9 +90,9 @@ def run_montecarlo_simulation(quiniela_tuple, probabilities_tuple, num_simulatio
     hits = np.sum(random_outcomes == quiniela_indices, axis=1)
     return np.sum(hits >= 11) / num_simulations
 
-def calculate_portfolio_objective(portfolio, probabilities, num_simulations):
+def calculate_portfolio_objective(portfolio, probabilities_tuple, num_simulations):
     if not portfolio: return 0
-    probs_win = [run_montecarlo_simulation(tuple(q), probabilities, num_simulations) for q in portfolio]
+    probs_win = [run_montecarlo_simulation(tuple(q), probabilities_tuple, num_simulations) for q in portfolio]
     return 1 - np.prod([(1 - p) for p in probs_win])
 
 def is_valid_quiniela(quiniela):
@@ -120,17 +125,15 @@ def get_neighbor_portfolio(portfolio):
     return portfolio
 
 def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations):
-    probabilities = tuple(map(tuple, df[['p_L', 'p_E', 'p_V']].values))
-    df_result = df.copy()
-    df_result['result'] = df_result.apply(lambda row: max({'L':row['p_L'], 'E':row['p_E'], 'V':row['p_V']}, key=lambda k: k), axis=1)
-    current_portfolio = create_initial_portfolio(df_result, num_quinielas)
-    current_energy = calculate_portfolio_objective(current_portfolio, probabilities, num_simulations)
+    probabilities_tuple = tuple(map(tuple, df[['p_L', 'p_E', 'p_V']].values))
+    current_portfolio = create_initial_portfolio(df, num_quinielas)
+    current_energy = calculate_portfolio_objective(current_portfolio, probabilities_tuple, num_simulations)
     best_portfolio, best_energy = current_portfolio, current_energy
     temp = initial_temp
     progress_bar = st.progress(0, text="Iniciando optimización...")
     for i in range(iterations):
         neighbor_portfolio = get_neighbor_portfolio(current_portfolio)
-        neighbor_energy = calculate_portfolio_objective(neighbor_portfolio, probabilities, num_simulations)
+        neighbor_energy = calculate_portfolio_objective(neighbor_portfolio, probabilities_tuple, num_simulations)
         delta_energy = neighbor_energy - current_energy
         if delta_energy > 0 or np.random.rand() < math.exp(delta_energy / temp):
             current_portfolio, current_energy = neighbor_portfolio, neighbor_energy
@@ -142,11 +145,9 @@ def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, co
     return best_portfolio
 
 # --- FLUJO PRINCIPAL DE LA APP ---
-# Guardar estado entre ejecuciones
 if 'matches_df' not in st.session_state: st.session_state.matches_df = None
 if 'final_df' not in st.session_state: st.session_state.final_df = None
 
-# --- PASO 1: ENTRADA DE DATOS (OCR) ---
 st.sidebar.header("Paso 1: Cargar Quiniela")
 uploaded_file = st.sidebar.file_uploader("Sube la imagen de la quiniela", type=["png", "jpg", "jpeg"])
 if uploaded_file:
@@ -161,12 +162,11 @@ if uploaded_file:
                 extracted_matches = get_matches_from_image_with_ocr(image_bytes, api_key)
             if extracted_matches:
                 st.session_state.matches_df = pd.DataFrame(extracted_matches)
-                st.session_state.final_df = None # Resetear el df final
+                st.session_state.final_df = None
                 st.success("¡Partidos extraídos!")
             else:
                 st.error("No se pudieron extraer los partidos.")
 
-# --- PASO 2: OBTENCIÓN DE MOMIOS (SCRAPING) ---
 if st.session_state.matches_df is not None:
     st.header("1. Partidos Extraídos")
     st.dataframe(st.session_state.matches_df)
@@ -182,7 +182,6 @@ if st.session_state.matches_df is not None:
         st.session_state.final_df = st.session_state.matches_df.join(probs_df)
         st.success("¡Búsqueda de momios completada!")
 
-# --- PASO 3: MODELADO Y OPTIMIZACIÓN ---
 if st.session_state.final_df is not None:
     st.header("2. Momios y Probabilidades Base")
     st.dataframe(st.session_state.final_df[['home', 'away', 'odds', 'p_L', 'p_E', 'p_V']])
@@ -190,4 +189,33 @@ if st.session_state.final_df is not None:
     st.sidebar.header("Parámetros de Optimización")
     num_quinielas = st.sidebar.slider("Número de quinielas", 5, 30, 15)
     iterations = st.sidebar.select_slider("Iteraciones", options=[500, 1000, 2000, 5000], value=1000)
-    initial_temp = st.sidebar.slider("Temperatura inicial", 0.1, 1.0,
+    # --- LÍNEA CORREGIDA ---
+    initial_temp = st.sidebar.slider("Temperatura inicial", 0.1, 1.0, 0.5, 0.05)
+    cooling_rate = st.sidebar.select_slider("Tasa de enfriamiento", options=[0.99, 0.995, 0.999], value=0.995)
+    num_simulations = st.sidebar.select_slider("Simulaciones Montecarlo", options=[1000, 2500, 5000], value=2500)
+
+    if st.button("🔥 Iniciar Optimización Avanzada", type="primary"):
+        with st.spinner("Aplicando reglas de modelado heurístico..."):
+            df_modelado = st.session_state.final_df.copy()
+            df_modelado = apply_draw_propensity_rule(df_modelado)
+            df_modelado = apply_global_regularization(df_modelado)
+            df_modelado['result'] = df_modelado.apply(get_most_probable_result, axis=1)
+        st.success("Reglas de modelado aplicadas.")
+
+        final_portfolio = run_simulated_annealing(df_modelado, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations)
+        
+        st.header("4. Portafolio Óptimo Encontrado")
+        probabilities_tuple = tuple(map(tuple, df_modelado[['p_L', 'p_E', 'p_V']].values))
+        final_probs = [run_montecarlo_simulation(tuple(q), probabilities_tuple, num_simulations * 2) for q in final_portfolio]
+        
+        match_names = df_modelado.apply(lambda row: f"{row['home']} vs {row['away']}", axis=1).tolist()
+        quiniela_names = [f"Quiniela {i+1}" for i in range(num_quinielas)]
+        portfolio_dict = {name: data for name, data in zip(quiniela_names, final_portfolio)}
+        portfolio_df = pd.DataFrame(portfolio_dict, index=match_names)
+        
+        prob_series = pd.Series({name: f"{prob:.2%}" for name, prob in zip(quiniela_names, final_probs)}, name="Pr[≥11]")
+        portfolio_df.loc["**Pr[≥11]**"] = prob_series
+        
+        st.dataframe(portfolio_df)
+        csv_output = portfolio_df.to_csv().encode('utf-8')
+        st.download_button("📥 Descargar Portafolio Óptimo", csv_output, "portafolio_optimizado_pro.csv", "text/csv")
