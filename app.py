@@ -5,6 +5,7 @@ import base64
 import json
 import time
 import math
+import re # Importamos la librería de expresiones regulares
 from openai import OpenAI
 import odds_scraper # Nuestro módulo de scraping
 
@@ -22,27 +23,33 @@ V_SUM_RANGE = (4.2, 5.2)
 MIN_DRAWS_PER_TICKET = 4
 MAX_DRAWS_PER_TICKET = 6
 
-# --- MÓDULO DE OCR CON OPENAI ---
+# --- MÓDULO DE OCR CON OPENAI (LÓGICA MEJORADA) ---
 def get_matches_from_image_with_ocr(image_bytes, api_key):
     st.info("Contactando a la IA de Visión... por favor espera.")
     try:
         client = OpenAI(api_key=api_key)
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # --- PROMPT MEJORADO Y MÁS ESTRICTO ---
         response = client.chat.completions.create(
             model="o4-mini-2025-04-16",
             messages=[
+                {
+                    "role": "system",
+                    "content": "Eres una API de extracción de datos. Tu único propósito es analizar imágenes y devolver un objeto JSON estructurado. Nunca incluyes texto conversacional, disculpas o explicaciones. Tu respuesta es siempre y únicamente un JSON válido."
+                },
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
                             "text": """
-                            Analiza esta imagen de una quiniela de Progol. Extrae los partidos (principales y revancha).
-                            Devuelve el resultado como un único array JSON.
-                            Cada objeto debe tener las claves "home" y "away".
-                            Limpia los nombres de los equipos (ej. "A. SAUD SUB" -> "Arabia Saudita Sub-23", "E.U.A." -> "USA").
-                            Si no puedes analizar la imagen o no encuentras los partidos, devuelve un array JSON vacío: [].
-                            Tu respuesta DEBE contener únicamente el array JSON y nada más.
+                            Analiza la imagen de la quiniela Progol. Extrae los 21 partidos (14 regulares + 7 revancha).
+                            Devuelve un único array JSON que contenga 21 objetos.
+                            Cada objeto DEBE tener dos claves: "home" y "away".
+                            Limpia los nombres de los equipos (ej. "A. SAUD SUB" se convierte en "Arabia Saudita Sub-23").
+                            Si la imagen es ilegible o no encuentras los partidos, DEBES devolver un array JSON vacío: [].
+                            No añadas ningún texto antes o después del array JSON. Toda tu respuesta debe ser el propio JSON.
                             """
                         },
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
@@ -51,19 +58,33 @@ def get_matches_from_image_with_ocr(image_bytes, api_key):
             ],
             max_completion_tokens=2000,
         )
-        json_string = response.choices[0].message.content.strip()
-        if json_string.startswith('[') and json_string.endswith(']'):
-            json_string = json_string.replace("```json", "").replace("```", "")
-            return json.loads(json_string)
+        
+        # --- EXTRACCIÓN DE JSON MÁS ROBUSTA ---
+        raw_response = response.choices[0].message.content.strip()
+        
+        # Usamos una expresión regular para encontrar el array JSON dentro del texto
+        json_match = re.search(r'\[.*\]', raw_response, re.DOTALL)
+        
+        if json_match:
+            json_string = json_match.group(0)
+            try:
+                # Intentamos decodificar el JSON encontrado
+                return json.loads(json_string)
+            except json.JSONDecodeError as e:
+                st.error(f"Se encontró un texto JSON pero no se pudo decodificar: {e}")
+                st.code(json_string) # Muestra el JSON problemático
+                return None
         else:
-            st.error("La respuesta de la IA no fue un JSON válido.")
-            st.code(json_string)
+            st.error("La IA no devolvió un array JSON en su respuesta.")
+            st.code(raw_response) # Muestra la respuesta completa de la IA
             return None
+
     except Exception as e:
         st.error(f"Error con la API de OpenAI: {e}")
         return None
 
-# --- MÓDULOS DE MODELADO Y OPTIMIZACIÓN ---
+
+# --- MÓDULOS DE MODELADO Y OPTIMIZACIÓN (Sin cambios) ---
 def get_most_probable_result(row):
     probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
     return max(probs, key=probs.get)
@@ -170,8 +191,6 @@ with st.sidebar.expander("🤖 Modo Automático (IA y Scraping)", expanded=True)
                 else:
                     st.error("No se pudieron extraer los partidos.")
 
-    # --- LÓGICA CORREGIDA ---
-    # El botón de scraping solo aparece si la tabla de partidos ya fue creada por el OCR
     if isinstance(st.session_state.get('matches_df'), pd.DataFrame) and not st.session_state.matches_df.empty:
         if st.button("3. Buscar Momios en Tiempo Real", key="scrape_button"):
             all_odds = []
@@ -193,7 +212,7 @@ with st.sidebar.expander("✍️ Modo Manual (Subir CSV)"):
     if manual_uploaded_file:
         df_manual = pd.read_csv(manual_uploaded_file)
         required_cols = ['home', 'away', 'p_L', 'p_E', 'p_V']
-        if all(col in df_manual.columns for col in required_cols):
+        if all(col in df_manual.columns for col in df_manual.columns):
             st.session_state.final_df = df_manual
             st.success("CSV cargado y listo para optimizar.")
         else:
@@ -201,10 +220,10 @@ with st.sidebar.expander("✍️ Modo Manual (Subir CSV)"):
 
 # --- PASO FINAL: OPTIMIZACIÓN (COMÚN A AMBOS MODOS) ---
 if isinstance(st.session_state.get('final_df'), pd.DataFrame) and not st.session_state.final_df.empty:
-    st.header("Datos Listos para Optimización")
+    st.header("1. Datos Listos para Optimización")
     st.dataframe(st.session_state.final_df)
     
-    st.header("Optimización del Portafolio")
+    st.header("2. Optimización del Portafolio")
     st.sidebar.header("Parámetros de Optimización")
     num_quinielas = st.sidebar.slider("Número de quinielas", 5, 30, 15, key="q_slider")
     iterations = st.sidebar.select_slider("Iteraciones", options=[500, 1000, 2000, 5000], value=1000, key="iter_slider")
@@ -222,7 +241,7 @@ if isinstance(st.session_state.get('final_df'), pd.DataFrame) and not st.session
 
         final_portfolio = run_simulated_annealing(df_modelado, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations)
         
-        st.header("Portafolio Óptimo Encontrado")
+        st.header("3. Portafolio Óptimo Encontrado")
         probabilities_tuple = tuple(map(tuple, df_modelado[['p_L', 'p_E', 'p_V']].values))
         final_probs = [run_montecarlo_simulation(tuple(q), probabilities_tuple, num_simulations * 2) for q in final_portfolio]
         
