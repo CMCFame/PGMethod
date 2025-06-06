@@ -2,3 +2,8 @@
 streamlit
 pandas
 numpy
+requests
+beautifulsoup4
+fake-useragent
+lxml
+openai
