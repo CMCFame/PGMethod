@@ -21,7 +21,7 @@ PROB_DIVISOR_MIN = 0.40 # Probabilidad para ser "Divisor"
 def classify_matches(df):
     """
     Clasifica los partidos en 'Ancla', 'Divisor' y 'Neutro' basado en sus probabilidades.
-    Esta es una pieza clave de la metodología. 
+    Esta es una pieza clave de la metodología.
     """
     conditions = [
         df['p_max'] >= PROB_ANCLA,
@@ -46,7 +46,7 @@ def get_second_most_probable_result(row):
 def generate_core_quiniela(df, min_draws, max_draws):
     """
     Genera la quiniela 'Core', que es la base de nuestro portafolio.
-    Se asegura de cumplir con la regla de 4-6 empates. 
+    Se asegura de cumplir con la regla de 4-6 empates.
     """
     core_quiniela = [get_most_probable_result(row) for _, row in df.iterrows()]
     
@@ -81,7 +81,7 @@ def generate_core_quiniela(df, min_draws, max_draws):
 def generate_satellite_quinielas(df, core_quiniela, num_satellites):
     """
     Genera quinielas 'Satélite' creando variaciones en los partidos 'Divisor'.
-    Esto crea la correlación negativa y diversificación que busca la metodología. 
+    Esto crea la correlación negativa y diversificación que busca la metodología.
     """
     satellites = []
     divisor_indices = df[df['classification'] == 'Divisor'].index.tolist()
@@ -165,10 +165,12 @@ try:
         # Combine into final portfolio
         portfolio_list = [core_quiniela] + satellite_quinielas
         
-        # Create DataFrame for display
+        # --- LÍNEA CORREGIDA ---
+        # Ahora el número de columnas se basa en el número de partidos en el archivo
+        num_matches = len(df)
         portfolio_df = pd.DataFrame(
             portfolio_list,
-            columns=[f"Partido {i+1}" for i in range(14)],
+            columns=[f"Partido {i+1}" for i in range(num_matches)], # <-- ESTA ES LA LÍNEA QUE CAMBIÓ
             index=[f"Quiniela Core"] + [f"Satélite {i+1}" for i in range(num_satellites)]
         )
         
