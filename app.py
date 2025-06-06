@@ -29,7 +29,7 @@ def get_matches_from_image_with_ocr(image_bytes, api_key):
         client = OpenAI(api_key=api_key)
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         response = client.chat.completions.create(
-            model="gpt-4-vision-preview",
+            model="o4-mini-2025-04-16", # --- MODELO ACTUALIZADO ---
             messages=[
                 {
                     "role": "user",
@@ -162,7 +162,7 @@ if uploaded_file:
                 extracted_matches = get_matches_from_image_with_ocr(image_bytes, api_key)
             if extracted_matches:
                 st.session_state.matches_df = pd.DataFrame(extracted_matches)
-                st.session_state.final_df = None
+                st.session_state.final_df = None # Resetear el df final
                 st.success("¡Partidos extraídos!")
             else:
                 st.error("No se pudieron extraer los partidos.")
@@ -189,7 +189,6 @@ if st.session_state.final_df is not None:
     st.sidebar.header("Parámetros de Optimización")
     num_quinielas = st.sidebar.slider("Número de quinielas", 5, 30, 15)
     iterations = st.sidebar.select_slider("Iteraciones", options=[500, 1000, 2000, 5000], value=1000)
-    # --- LÍNEA CORREGIDA ---
     initial_temp = st.sidebar.slider("Temperatura inicial", 0.1, 1.0, 0.5, 0.05)
     cooling_rate = st.sidebar.select_slider("Tasa de enfriamiento", options=[0.99, 0.995, 0.999], value=0.995)
     num_simulations = st.sidebar.select_slider("Simulaciones Montecarlo", options=[1000, 2500, 5000], value=2500)
