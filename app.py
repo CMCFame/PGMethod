@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -141,7 +142,6 @@ st.sidebar.header("Paso 1: Cargar Datos")
 uploaded_file = st.sidebar.file_uploader("Sube tu CSV con partidos y probabilidades", type=["csv"])
 
 if uploaded_file is not None:
-    # Usar la nueva funci¨®n de carga robusta
     df = load_csv_with_encoding_fallbacks(uploaded_file)
     
     if df is not None:
