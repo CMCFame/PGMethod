@@ -17,31 +17,22 @@ st.markdown("Una herramienta de vanguardia para la optimización de portafolios 
 # --- CONSTANTES DE LA METODOLOGÍA ---
 PROB_ANCLA = 0.60
 DRAW_PROPENSITY_THRESHOLD = 0.08
-L_SUM_RANGE = (5.0, 5.8)
-E_SUM_RANGE = (3.5, 4.6)
-V_SUM_RANGE = (4.2, 5.2)
+L_SUM_RANGE = (5.0, 5.8); E_SUM_RANGE = (3.5, 4.6); V_SUM_RANGE = (4.2, 5.2)
 MIN_DRAWS_PER_TICKET = 4
 MAX_DRAWS_PER_TICKET = 6
 
-# --- MÓDULO DE OCR CON OPENAI (CON DEPURACIÓN) ---
+# --- MÓDULO DE OCR CON OPENAI (CON DEPURACIÓN MEJORADA) ---
 def get_matches_from_image_with_ocr(image_bytes, api_key, debug_mode=False):
     st.info("Contactando a la IA de Visión... por favor espera.")
     try:
         client = OpenAI(api_key=api_key)
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
-        prompt_text = """
-        Analiza la imagen de la quiniela Progol. Extrae los 21 partidos (14 regulares + 7 revancha).
-        Devuelve un único array JSON que contenga 21 objetos.
-        Cada objeto DEBE tener dos claves: "home" y "away".
-        Limpia los nombres de los equipos (ej. "A. SAUD SUB" se convierte en "Arabia Saudita Sub-23").
-        Si la imagen es ilegible o no encuentras los partidos, DEBES devolver un array JSON vacío: [].
-        No añadas ningún texto antes o después del array JSON. Toda tu respuesta debe ser el propio JSON.
-        """
+        prompt_text = "Analiza la imagen de la quiniela Progol. Extrae los 21 partidos. Devuelve un único array JSON con 21 objetos, cada uno con claves 'home' y 'away'. Limpia los nombres de los equipos. Si es ilegible, devuelve un array vacío []. Tu respuesta DEBE ser únicamente el JSON."
         
         response = client.chat.completions.create(
             model="o4-mini-2025-04-16",
             messages=[
-                {"role": "system", "content": "Eres una API de extracción de datos. Tu único propósito es analizar imágenes y devolver un objeto JSON estructurado. Nunca incluyes texto conversacional, disculpas o explicaciones. Tu respuesta es siempre y únicamente un JSON válido."},
+                {"role": "system", "content": "Eres una API de extracción de datos. Tu único propósito es analizar imágenes y devolver un objeto JSON estructurado. Nunca incluyes texto conversacional. Tu respuesta es siempre y únicamente un JSON válido."},
                 {"role": "user", "content": [{"type": "text", "text": prompt_text}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}
             ],
             max_completion_tokens=2000,
@@ -49,45 +40,28 @@ def get_matches_from_image_with_ocr(image_bytes, api_key, debug_mode=False):
         
         raw_response = response.choices[0].message.content.strip()
 
-        # --- MODO DE DEPURACIÓN ---
         if debug_mode:
-            with st.expander("🐞 Información de Depuración de OCR"):
-                st.write("**Prompt Enviado a la IA:**")
-                st.text(prompt_text)
-                st.write("**Respuesta Cruda Recibida de la IA:**")
-                st.text(raw_response)
+            st.session_state['ocr_debug_info'] = {"prompt": prompt_text, "response": raw_response}
 
-        # --- EXTRACCIÓN DE JSON MÁS ROBUSTA ---
-        start = raw_response.find('[')
-        end = raw_response.rfind(']')
-        
+        start, end = raw_response.find('['), raw_response.rfind(']')
         if start != -1 and end != -1 and end > start:
             json_string = raw_response[start:end+1]
-            try:
-                return json.loads(json_string)
-            except json.JSONDecodeError as e:
-                st.error(f"Error al decodificar el JSON extraído: {e}")
-                st.code(json_string)
-                return None
+            try: return json.loads(json_string)
+            except json.JSONDecodeError: st.error("Se encontró un JSON pero no se pudo decodificar."); st.code(json_string); return None
         else:
             st.error("La IA no devolvió un array JSON (`[...]`) en su respuesta.")
             if not debug_mode: st.code(raw_response)
             return None
-
     except Exception as e:
-        st.error(f"Error con la API de OpenAI: {e}")
-        return None
+        st.error(f"Error con la API de OpenAI: {e}"); return None
 
 # --- MÓDULOS DE MODELADO Y OPTIMIZACIÓN ---
 def get_most_probable_result(row):
-    probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
-    return max(probs, key=probs.get)
+    return max({'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}, key=lambda k: row[k])
 
 def apply_draw_propensity_rule(df):
     for i, row in df.iterrows():
-        is_close = abs(row['p_L'] - row['p_V']) < DRAW_PROPENSITY_THRESHOLD
-        is_draw_favored = row['p_E'] > max(row['p_L'], row['p_V'])
-        if is_close and is_draw_favored:
+        if abs(row['p_L'] - row['p_V']) < DRAW_PROPENSITY_THRESHOLD and row['p_E'] > max(row['p_L'], row['p_V']):
             df.loc[i, 'p_E'] += 0.06; df.loc[i, 'p_L'] -= 0.03; df.loc[i, 'p_V'] -= 0.03
     return df
 
@@ -113,27 +87,46 @@ def calculate_portfolio_objective(portfolio, probabilities_tuple, num_simulation
     return 1 - np.prod([(1 - p) for p in probs_win])
 
 def is_valid_quiniela(quiniela):
-    draws = quiniela.count('E')
-    return MIN_DRAWS_PER_TICKET <= draws <= MAX_DRAWS_PER_TICKET
+    return MIN_DRAWS_PER_TICKET <= quiniela.count('E') <= MAX_DRAWS_PER_TICKET
 
+# --- LÓGICA DE INICIALIZACIÓN DE PORTAFOLIO CORREGIDA ---
 def create_initial_portfolio(df, num_quinielas):
-    portfolio = []; base_results = df['result'].tolist()
-    for _ in range(num_quinielas):
-        quiniela = base_results.copy()
-        while not is_valid_quiniela(quiniela):
-            idx_to_change = np.random.randint(0, len(quiniela)); quiniela[idx_to_change] = np.random.choice(['L', 'E', 'V'])
-        portfolio.append(quiniela)
+    portfolio = []
+    # 1. Crear la quiniela "Core" como la más probable y validarla
+    core_quiniela = df['result'].tolist()
+    while not is_valid_quiniela(core_quiniela):
+        # Ajuste simple si no es válida: cambiar un resultado al azar
+        idx_to_change = np.random.randint(0, len(core_quiniela))
+        core_quiniela[idx_to_change] = np.random.choice(['L', 'E', 'V'])
+    portfolio.append(core_quiniela)
+    
+    # 2. Crear el resto del portafolio con diversidad garantizada
+    for _ in range(num_quinielas - 1):
+        # Empezar con una copia del core y hacerle cambios significativos
+        new_quiniela = core_quiniela.copy()
+        num_flips = np.random.randint(2, 5) # Hacer de 2 a 4 cambios para diversificar
+        
+        for _ in range(100): # Intentar hasta 100 veces crear una quiniela válida
+            temp_quiniela = new_quiniela.copy()
+            indices_to_change = np.random.choice(len(temp_quiniela), num_flips, replace=False)
+            for idx in indices_to_change:
+                options = ['L', 'E', 'V']; options.remove(temp_quiniela[idx]); temp_quiniela[idx] = np.random.choice(options)
+            
+            if is_valid_quiniela(temp_quiniela):
+                new_quiniela = temp_quiniela
+                break
+        portfolio.append(new_quiniela)
     return portfolio
 
 def get_neighbor_portfolio(portfolio):
     new_portfolio = [q.copy() for q in portfolio]
-    q_idx = np.random.randint(0, len(new_portfolio)); m_idx = np.random.randint(0, len(new_portfolio[q_idx]))
+    q_idx, m_idx = np.random.randint(0, len(new_portfolio)), np.random.randint(0, len(new_portfolio[0]))
     original_quiniela = new_portfolio[q_idx].copy()
     for _ in range(10):
-        new_quiniela = original_quiniela.copy()
-        options = ['L', 'E', 'V']; options.remove(new_quiniela[m_idx]); new_quiniela[m_idx] = np.random.choice(options)
-        if is_valid_quiniela(new_quiniela):
-            new_portfolio[q_idx] = new_quiniela; return new_portfolio
+        new_q = original_quiniela.copy()
+        options = ['L', 'E', 'V']; options.remove(new_q[m_idx]); new_q[m_idx] = np.random.choice(options)
+        if is_valid_quiniela(new_q):
+            new_portfolio[q_idx] = new_q; return new_portfolio
     return portfolio
 
 def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations):
@@ -158,6 +151,7 @@ def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, co
 # --- FLUJO PRINCIPAL DE LA APP ---
 if 'matches_df' not in st.session_state: st.session_state.matches_df = None
 if 'final_df' not in st.session_state: st.session_state.final_df = None
+if 'ocr_debug_info' not in st.session_state: st.session_state.ocr_debug_info = None
 
 st.sidebar.header("Elige tu modo de trabajo")
 
@@ -199,12 +193,18 @@ with st.sidebar.expander("✍️ Modo Manual (Subir CSV)"):
             st.session_state.final_df = df_manual; st.success("CSV cargado y listo para optimizar.")
         else: st.error(f"El CSV debe contener las columnas: {', '.join(required_cols)}")
 
+# --- VISUALIZACIÓN DE DEBUG (MOVIDA AL ÁREA PRINCIPAL) ---
+if st.session_state.get('ocr_debug_info'):
+    with st.expander("🐞 Información de Depuración de OCR"):
+        debug_info = st.session_state.ocr_debug_info
+        st.write("**Prompt Enviado a la IA:**"); st.text(debug_info['prompt'])
+        st.write("**Respuesta Cruda Recibida de la IA:**"); st.text(debug_info['response'])
+    st.session_state.ocr_debug_info = None # Limpiar después de mostrar
+
 # --- PASO FINAL: OPTIMIZACIÓN ---
 if isinstance(st.session_state.get('final_df'), pd.DataFrame) and not st.session_state.final_df.empty:
-    st.header("1. Datos Listos para Optimización")
-    st.dataframe(st.session_state.final_df)
-    st.header("2. Optimización del Portafolio")
-    st.sidebar.header("Parámetros de Optimización")
+    st.header("1. Datos Listos para Optimización"); st.dataframe(st.session_state.final_df)
+    st.header("2. Optimización del Portafolio"); st.sidebar.header("Parámetros de Optimización")
     num_quinielas = st.sidebar.slider("Número de quinielas", 5, 30, 15, key="q_slider")
     iterations = st.sidebar.select_slider("Iteraciones", options=[500, 1000, 2000, 5000], value=1000, key="iter_slider")
     initial_temp = st.sidebar.slider("Temperatura inicial", 0.1, 1.0, 0.5, 0.05, key="temp_slider")
@@ -224,12 +224,10 @@ if isinstance(st.session_state.get('final_df'), pd.DataFrame) and not st.session
         st.header("3. Portafolio Óptimo Encontrado")
         probabilities_tuple = tuple(map(tuple, df_modelado[['p_L', 'p_E', 'p_V']].values))
         final_probs = [run_montecarlo_simulation(tuple(q), probabilities_tuple, num_simulations * 2) for q in final_portfolio]
-        
         match_names = df_modelado.apply(lambda row: f"{row['home']} vs {row['away']}", axis=1).tolist()
         quiniela_names = [f"Quiniela {i+1}" for i in range(num_quinielas)]
         portfolio_dict = {name: data for name, data in zip(quiniela_names, final_portfolio)}
         portfolio_df = pd.DataFrame(portfolio_dict, index=match_names)
-        
         prob_series = pd.Series({name: f"{prob:.2%}" for name, prob in zip(quiniela_names, final_probs)}, name="Pr[≥11]")
         portfolio_df.loc["**Pr[≥11]**"] = prob_series
         
