@@ -5,31 +5,29 @@ import numpy as np
 import time
 import math
 
-# --- Configuraci車n de la App ---
+# --- Configuracion de la App ---
 st.set_page_config(page_title="Progol Optimizer Pro (Definitive)", page_icon="??", layout="wide")
-st.title("?? Progol Optimizer Pro (Versi車n Definitiva)")
-st.markdown("Una implementaci車n completa de la **Metodolog赤a Definitiva Progol**, incluyendo todas las reglas de validaci車n y optimizaci車n estrat谷gica.")
+st.title("?? Progol Optimizer Pro (Version Definitiva)")
+st.markdown("Una implementacion completa de la **Metodologia Definitiva Progol**, incluyendo todas las reglas de validacion y optimizacion estrategica.")
 
-# --- CONSTANTES DE LA METODOLOG赤A ---
+# --- CONSTANTES DE LA METODOLOGIA ---
 NUM_MATCHES_PROGOL = 14
 L_COUNT_RANGE = (round(0.35 * NUM_MATCHES_PROGOL), round(0.41 * NUM_MATCHES_PROGOL)) # 5-6
-E_COUNT_RANGE = (4, 6) # Regla expl赤cita
+E_COUNT_RANGE = (4, 6) # Regla explicita
 V_COUNT_RANGE = (round(0.30 * NUM_MATCHES_PROGOL), round(0.36 * NUM_MATCHES_PROGOL)) # 4-5
-CONCENTRATION_LIMIT = 0.70 # L赤mite de concentraci車n para un solo signo
+CONCENTRATION_LIMIT = 0.70 # Limite de concentracion para un solo signo
 
 # Reglas de modelado
 DRAW_PROPENSITY_THRESHOLD = 0.08
 L_SUM_RANGE = (5.0, 5.8); E_SUM_RANGE = (3.5, 4.6); V_SUM_RANGE = (4.2, 5.2)
 
-# --- FUNCI車N DE CARGA DE CSV MEJORADA ---
+# --- FUNCION DE CARGA DE CSV MEJORADA ---
 def load_csv_with_encoding_fallbacks(uploaded_file):
     """Intenta leer un CSV con diferentes codificaciones para evitar errores."""
     try:
-        # 1. Intentar con la codificaci車n est芍ndar UTF-8
         return pd.read_csv(uploaded_file)
     except UnicodeDecodeError:
-        st.warning("La codificaci車n UTF-8 fall車. Intentando con 'latin-1'...")
-        # 2. Si falla, rebobinar el archivo e intentar con latin-1
+        st.warning("La codificacion UTF-8 fallo. Intentando con 'latin-1'...")
         uploaded_file.seek(0)
         try:
             return pd.read_csv(uploaded_file, encoding='latin-1')
@@ -37,7 +35,7 @@ def load_csv_with_encoding_fallbacks(uploaded_file):
             st.error(f"No se pudo leer el archivo CSV. Error: {e}")
             return None
 
-# --- M車DULOS DE MODELADO Y OPTIMIZACI車N ---
+# --- MODULOS DE MODELADO Y OPTIMIZACION ---
 def classify_matches(df):
     prob_ancla = 0.60; prob_divisor_min = 0.40
     df['p_max'] = df[['p_L', 'p_E', 'p_V']].max(axis=1)
@@ -123,7 +121,7 @@ def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, co
     current_portfolio = create_initial_portfolio(df, num_quinielas)
     current_energy = calculate_portfolio_objective(current_portfolio, probabilities_tuple, num_simulations)
     best_portfolio, best_energy = current_portfolio, current_energy; temp = initial_temp
-    progress_bar = st.progress(0, text="Iniciando optimizaci車n...")
+    progress_bar = st.progress(0, text="Iniciando optimizacion...")
     for i in range(iterations):
         neighbor_portfolio = get_neighbor_portfolio(current_portfolio, df)
         neighbor_energy = calculate_portfolio_objective(neighbor_portfolio, probabilities_tuple, num_simulations)
@@ -133,8 +131,8 @@ def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, co
         if current_energy > best_energy:
             best_portfolio, best_energy = current_portfolio, current_energy
         temp *= cooling_rate
-        progress_bar.progress((i + 1) / iterations, text=f"Iteraci車n {i+1}/{iterations} | Score: {best_energy:.4f}")
-    st.success("?Optimizaci車n completada!")
+        progress_bar.progress((i + 1) / iterations, text=f"Iteracion {i+1}/{iterations} | Score: {best_energy:.4f}")
+    st.success("?Optimizacion completada!")
     return best_portfolio
 
 # --- FLUJO PRINCIPAL DE LA APP ---
@@ -148,39 +146,39 @@ if uploaded_file is not None:
         st.header("1. Datos Cargados")
         st.dataframe(df)
 
-        st.sidebar.header("Paso 2: Par芍metros de Optimizaci車n")
-        num_quinielas = st.sidebar.slider("N迆mero de quinielas", 5, 30, 15)
+        st.sidebar.header("Paso 2: Parametros de Optimizacion")
+        num_quinielas = st.sidebar.slider("Numero de quinielas", 5, 30, 15)
         iterations = st.sidebar.select_slider("Iteraciones del optimizador", options=[500, 1000, 2000, 5000], value=1000)
         initial_temp = st.sidebar.slider("Temperatura inicial", 0.1, 1.0, 0.5, 0.05)
         cooling_rate = st.sidebar.select_slider("Tasa de enfriamiento", options=[0.99, 0.995, 0.999], value=0.995)
         num_simulations = st.sidebar.select_slider("Simulaciones Montecarlo", options=[1000, 2500, 5000], value=1000)
 
-        if st.sidebar.button("?? Iniciar Optimizaci車n Definitiva", type="primary"):
-            st.header("2. Proceso de Optimizaci車n")
-            with st.spinner("Aplicando reglas de modelado heur赤stico..."):
+        if st.sidebar.button("?? Iniciar Optimizacion Definitiva", type="primary"):
+            st.header("2. Proceso de Optimizacion")
+            with st.spinner("Aplicando reglas de modelado heuristico..."):
                 df_modelado = df.copy()
                 df_modelado = apply_draw_propensity_rule(df_modelado)
                 df_modelado = apply_global_regularization(df_modelado)
                 df_modelado = classify_matches(df_modelado)
                 df_modelado['result'] = df_modelado.apply(get_most_probable_result, axis=1)
             st.success("Reglas de modelado aplicadas.")
-            st.write("Clasificaci車n de partidos para optimizaci車n:")
+            st.write("Clasificacion de partidos para optimizacion:")
             st.dataframe(df_modelado[['home', 'away', 'classification', 'p_max']])
 
             final_portfolio = run_simulated_annealing(df_modelado, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations)
             
-            st.header("3. Portafolio 車ptimo Encontrado")
+            st.header("3. Portafolio Optimo Encontrado")
             probabilities_tuple = tuple(map(tuple, df_modelado[['p_L', 'p_E', 'p_V']].values))
             final_probs = [run_montecarlo_simulation(tuple(q), probabilities_tuple, num_simulations * 2) for q in final_portfolio]
             match_names = df_modelado.apply(lambda row: f"{row['home']} vs {row['away']}", axis=1).tolist()
             quiniela_names = [f"Quiniela {i+1}" for i in range(num_quinielas)]
             portfolio_dict = {name: data for name, data in zip(quiniela_names, final_portfolio)}
             portfolio_df = pd.DataFrame(portfolio_dict, index=match_names)
-            prob_series = pd.Series({name: f"{prob:.2%}" for name, prob in zip(quiniela_names, final_probs)}, name="Pr[≡11]")
-            portfolio_df.loc["**Pr[≡11]**"] = prob_series
+            prob_series = pd.Series({name: f"{prob:.2%}" for name, prob in zip(quiniela_names, final_probs)}, name="Pr[>=11]")
+            portfolio_df.loc["**Pr[>=11]**"] = prob_series
             
             st.dataframe(portfolio_df)
             csv_output = portfolio_df.to_csv().encode('utf-8')
-            st.download_button("?? Descargar Portafolio 車ptimo", csv_output, "portafolio_optimizado_pro.csv", "text/csv")
+            st.download_button("?? Descargar Portafolio Optimo", csv_output, "portafolio_optimizado_pro.csv", "text/csv")
 else:
     st.info("Bienvenido a Progol Optimizer Pro. Por favor, sube un archivo CSV para comenzar.")
