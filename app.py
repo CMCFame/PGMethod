@@ -1,56 +1,188 @@
-# ===============  app.py  ===================================
 import streamlit as st
 import pandas as pd
-from pathlib import Path
-from io import StringIO
-from . import data_loader, optimizer, config
-from .odds_scraper import fetch_portfolio_odds, decimal_to_prob
+import numpy as np
+import random
 
-st.set_page_config(page_title="Progol Toolkit", layout="wide")
-st.title("⚽ Progol Quiniela Generator")
-
-# Sidebar inputs
-st.sidebar.header("Datos de Entrada")
-
-csv_file = st.sidebar.file_uploader("Sube el Progol.csv", type=["csv"])
-odds_json_text = st.sidebar.text_area(
-    "Pega el JSON de momios (opcional)",
-    placeholder="{\n  \"1\": {\"L\": 1.85, \"E\": 3.60, \"V\": 4.20},\n  ...\n}",
-    height=150,
+# --- App Configuration ---
+st.set_page_config(
+    page_title="Generador de Quinielas Progol",
+    page_icon="⚽",
+    layout="wide"
 )
 
-scrape_btn = st.sidebar.button("Raspar Momios 🌐 (SofaScore)")
+# --- Constants and Rules (inspired by config.py and the document) ---
+MIN_DRAWS_PER_TICKET = 4
+MAX_DRAWS_PER_TICKET = 6
+PROB_ANCLA = 0.60  # Probabilidad mínima para ser "Ancla"
+PROB_DIVISOR_MIN = 0.40 # Probabilidad para ser "Divisor"
 
-uploaded_path: str | Path | None = None
-if csv_file:
-    uploaded_path = Path("/tmp/progol_upload.csv")
-    uploaded_path.write_bytes(csv_file.getbuffer())
+# --- Helper Functions (inspired by utils.py and new logic) ---
 
-if scrape_btn and uploaded_path:
-    fixt_df = data_loader.load_fixtures(uploaded_path)
-    fixtures = fixt_df.to_records(index=False)
-    with st.spinner("Raspando momios…"):
-        odds_map = fetch_portfolio_odds(fixtures)
-    st.sidebar.success(f"Momios obtenidos para {len(odds_map)}/14 partidos")
-    odds_json_text = json.dumps(odds_map, indent=2)
+def classify_matches(df):
+    """
+    Clasifica los partidos en 'Ancla', 'Divisor' y 'Neutro' basado en sus probabilidades.
+    Esta es una pieza clave de la metodología. 
+    """
+    conditions = [
+        df['p_max'] >= PROB_ANCLA,
+        (df['p_max'] >= PROB_DIVISOR_MIN) & (df['p_max'] < PROB_ANCLA)
+    ]
+    choices = ['Ancla', 'Divisor']
+    df['classification'] = np.select(conditions, choices, default='Neutro')
+    return df
 
-# Parse odds JSON if present
+def get_most_probable_result(row):
+    """Obtiene el resultado más probable (L, E, V) de una fila de partido."""
+    probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
+    return max(probs, key=probs.get)
+
+def get_second_most_probable_result(row):
+    """Obtiene el segundo resultado más probable (L, E, V)."""
+    probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
+    # Ordena por probabilidad y toma el segundo
+    sorted_probs = sorted(probs.items(), key=lambda item: item[1], reverse=True)
+    return sorted_probs[1][0]
+
+def generate_core_quiniela(df, min_draws, max_draws):
+    """
+    Genera la quiniela 'Core', que es la base de nuestro portafolio.
+    Se asegura de cumplir con la regla de 4-6 empates. 
+    """
+    core_quiniela = [get_most_probable_result(row) for _, row in df.iterrows()]
+    
+    # Ajustar número de empates (regla de oro de la metodología)
+    num_draws = core_quiniela.count('E')
+    
+    # Si hay muy pocos empates, convierte los no-empates menos probables en empates.
+    if num_draws < min_draws:
+        # Partidos candidatos a cambiar a Empate (que no son 'E' y donde 'E' no es la peor opción)
+        candidates_to_flip_to_e = df[df['result'] != 'E'].sort_values(by='p_E', ascending=False)
+        for index in candidates_to_flip_to_e.index:
+            if core_quiniela[index] != 'E':
+                core_quiniela[index] = 'E'
+                if core_quiniela.count('E') >= min_draws:
+                    break # Salimos cuando cumplimos la cuota
+    
+    # Si hay demasiados empates, convierte los empates menos probables en su mejor alternativa.
+    elif num_draws > max_draws:
+        # Partidos candidatos a cambiar de Empate a otra cosa
+        candidates_to_flip_from_e = df[df['result'] == 'E'].sort_values(by='p_E', ascending=True)
+        for index in candidates_to_flip_from_e.index:
+            if core_quiniela[index] == 'E':
+                # Reemplaza 'E' con la mejor opción que no sea 'E'
+                p_l, p_v = df.loc[index, 'p_L'], df.loc[index, 'p_V']
+                core_quiniela[index] = 'L' if p_l > p_v else 'V'
+                if core_quiniela.count('E') <= max_draws:
+                    break # Salimos cuando cumplimos la cuota
+
+    return core_quiniela
+
+
+def generate_satellite_quinielas(df, core_quiniela, num_satellites):
+    """
+    Genera quinielas 'Satélite' creando variaciones en los partidos 'Divisor'.
+    Esto crea la correlación negativa y diversificación que busca la metodología. 
+    """
+    satellites = []
+    divisor_indices = df[df['classification'] == 'Divisor'].index.tolist()
+
+    if not divisor_indices:
+        st.warning("No se encontraron partidos 'Divisor'. Los satélites serán aleatorios.")
+        divisor_indices = df.index.tolist()
+
+    for i in range(num_satellites):
+        satellite = core_quiniela.copy()
+        
+        # Elegimos 1 o 2 partidos 'Divisor' al azar para cambiarlos
+        num_flips = random.randint(1, min(2, len(divisor_indices)))
+        indices_to_flip = random.sample(divisor_indices, num_flips)
+        
+        for index in indices_to_flip:
+            # Cambiamos el resultado al segundo más probable
+            satellite[index] = get_second_most_probable_result(df.loc[index])
+            
+        satellites.append(satellite)
+        
+    return satellites
+
+
+# --- Main App UI ---
+st.title("⚽ Generador de Portafolios para Progol")
+st.markdown("""
+Esta herramienta te ayuda a generar un portafolio de quinielas de Progol siguiendo la metodología **Core + Satélites**.
+1.  **Prepara tu CSV**: Asegúrate de que tu archivo `quiniela.csv` tenga las columnas `home, away, p_L, p_E, p_V`.
+2.  **Configura los parámetros**: Usa la barra lateral para definir cuántas quinielas quieres.
+3.  **Genera y descarga**: Haz clic en el botón para crear tu portafolio y descárgalo.
+""")
+
+# --- Sidebar Controls ---
+st.sidebar.header("Parámetros del Portafolio")
+num_quinielas = st.sidebar.slider("Número total de quinielas a generar", 5, 30, 10)
+min_draws, max_draws = st.sidebar.slider(
+    "Rango de Empates por quiniela", 
+    0, 14, 
+    (MIN_DRAWS_PER_TICKET, MAX_DRAWS_PER_TICKET)
+)
+
+# --- File Uploader ---
+st.sidebar.header("Datos de Entrada")
+uploaded_file = st.sidebar.file_uploader("Sube tu archivo quiniela.csv", type="csv")
+
+if uploaded_file is None:
+    st.info("Esperando a que subas tu archivo `quiniela.csv`...")
+    st.stop()
+
+# --- Main Logic ---
 try:
-    odds_map = json.loads(odds_json_text) if odds_json_text.strip() else None
-except Exception:
-    st.sidebar.error("JSON de momios inválido – se usará dummy odds")
-    odds_map = None
-
-# Main action
-if st.button("Generar Portafolio ✅"):
-    if not uploaded_path:
-        st.error("Debes subir un Progol.csv primero")
+    df = pd.read_csv(uploaded_file)
+    # Data Validation
+    required_cols = ['home', 'away', 'p_L', 'p_E', 'p_V']
+    if not all(col in df.columns for col in required_cols):
+        st.error(f"El archivo CSV debe contener las columnas: {', '.join(required_cols)}")
         st.stop()
-    df = data_loader.load_data(uploaded_path, odds_map)
-    st.subheader("Probabilidades por partido")
-    st.dataframe(df[["match_no", "home", "away", "prob_L", "prob_E", "prob_V"]])
+    if not np.allclose(df[['p_L', 'p_E', 'p_V']].sum(axis=1), 1.0):
+        st.warning("Algunas filas no suman 1.0. Las probabilidades serán normalizadas.")
+        df[['p_L', 'p_E', 'p_V']] = df[['p_L', 'p_E', 'p_V']].div(df[['p_L', 'p_E', 'p_V']].sum(axis=1), axis=0)
 
-    port, metrics = optimizer.build_portfolio(df, config)  # assuming optimizer returns (matrix, dict)
-    st.subheader("Matriz 14×N boletos")
-    st.dataframe(pd.DataFrame(port))
-    st.markdown(f"**Pr[≥11]:** {metrics['pr11']:.2%} – **ROI esp.:** {metrics['roi']:.1%}")
+    # Calculate max probability and best result
+    df['p_max'] = df[['p_L', 'p_E', 'p_V']].max(axis=1)
+    df['result'] = df.apply(get_most_probable_result, axis=1)
+    
+    # Classify matches
+    df = classify_matches(df)
+    
+    st.header("Análisis de Partidos")
+    st.dataframe(df[['home', 'away', 'p_L', 'p_E', 'p_V', 'p_max', 'result', 'classification']])
+
+    if st.button("🚀 Generar Portafolio de Quinielas", type="primary"):
+        # Generate Core Quiniela
+        core_quiniela = generate_core_quiniela(df, min_draws, max_draws)
+        
+        # Generate Satellites
+        num_satellites = num_quinielas - 1
+        satellite_quinielas = generate_satellite_quinielas(df, core_quiniela, num_satellites)
+        
+        # Combine into final portfolio
+        portfolio_list = [core_quiniela] + satellite_quinielas
+        
+        # Create DataFrame for display
+        portfolio_df = pd.DataFrame(
+            portfolio_list,
+            columns=[f"Partido {i+1}" for i in range(14)],
+            index=[f"Quiniela Core"] + [f"Satélite {i+1}" for i in range(num_satellites)]
+        )
+        
+        st.header("✅ Portafolio Generado")
+        st.dataframe(portfolio_df)
+        
+        # Add download button
+        csv_output = portfolio_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Descargar Portafolio en CSV",
+            data=csv_output,
+            file_name="portafolio_progol.csv",
+            mime="text/csv",
+        )
+
+except Exception as e:
+    st.error(f"Ha ocurrido un error al procesar el archivo: {e}")
