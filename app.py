@@ -21,7 +21,6 @@ PROB_DIVISOR_MIN = 0.40 # Probabilidad para ser "Divisor"
 def classify_matches(df):
     """
     Clasifica los partidos en 'Ancla', 'Divisor' y 'Neutro' basado en sus probabilidades.
-    Esta es una pieza clave de la metodología.
     """
     conditions = [
         df['p_max'] >= PROB_ANCLA,
@@ -39,87 +38,80 @@ def get_most_probable_result(row):
 def get_second_most_probable_result(row):
     """Obtiene el segundo resultado más probable (L, E, V)."""
     probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
-    # Ordena por probabilidad y toma el segundo
     sorted_probs = sorted(probs.items(), key=lambda item: item[1], reverse=True)
     return sorted_probs[1][0]
 
 def generate_core_quiniela(df, min_draws, max_draws):
     """
-    Genera la quiniela 'Core', que es la base de nuestro portafolio.
-    Se asegura de cumplir con la regla de 4-6 empates.
+    Genera la quiniela 'Core', asegurándose de cumplir con la regla de empates.
     """
     core_quiniela = [get_most_probable_result(row) for _, row in df.iterrows()]
-    
-    # Ajustar número de empates (regla de oro de la metodología)
     num_draws = core_quiniela.count('E')
     
-    # Si hay muy pocos empates, convierte los no-empates menos probables en empates.
+    # Ajustar si hay muy pocos empates
     if num_draws < min_draws:
-        # Partidos candidatos a cambiar a Empate (que no son 'E' y donde 'E' no es la peor opción)
         candidates_to_flip_to_e = df[df['result'] != 'E'].sort_values(by='p_E', ascending=False)
         for index in candidates_to_flip_to_e.index:
             if core_quiniela[index] != 'E':
                 core_quiniela[index] = 'E'
                 if core_quiniela.count('E') >= min_draws:
-                    break # Salimos cuando cumplimos la cuota
+                    break
     
-    # Si hay demasiados empates, convierte los empates menos probables en su mejor alternativa.
+    # Ajustar si hay demasiados empates
     elif num_draws > max_draws:
-        # Partidos candidatos a cambiar de Empate a otra cosa
         candidates_to_flip_from_e = df[df['result'] == 'E'].sort_values(by='p_E', ascending=True)
         for index in candidates_to_flip_from_e.index:
             if core_quiniela[index] == 'E':
-                # Reemplaza 'E' con la mejor opción que no sea 'E'
                 p_l, p_v = df.loc[index, 'p_L'], df.loc[index, 'p_V']
-                core_quiniela[index] = 'L' if p_l > p_v else 'V'
+                core_quiniela[index] = 'L' if p_l >= p_v else 'V'
                 if core_quiniela.count('E') <= max_draws:
-                    break # Salimos cuando cumplimos la cuota
-
+                    break
     return core_quiniela
-
 
 def generate_satellite_quinielas(df, core_quiniela, num_satellites):
     """
-    Genera quinielas 'Satélite' creando variaciones en los partidos 'Divisor'.
-    Esto crea la correlación negativa y diversificación que busca la metodología.
+    NUEVA LÓGICA: Genera satélites únicos y diversificados.
+    Identifica los partidos más inciertos y los va cambiando sistemáticamente.
     """
     satellites = []
-    divisor_indices = df[df['classification'] == 'Divisor'].index.tolist()
+    # Priorizamos cambiar los partidos que no son anclas, ordenados del más incierto al menos incierto
+    uncertain_matches = df[df['classification'] != 'Ancla'].sort_values(by='p_max', ascending=True)
+    
+    if uncertain_matches.empty:
+        st.warning("No hay partidos inciertos para diversificar. Los satélites podrían ser idénticos.")
+        return [core_quiniela.copy() for _ in range(num_satellites)]
 
-    if not divisor_indices:
-        st.warning("No se encontraron partidos 'Divisor'. Los satélites serán aleatorios.")
-        divisor_indices = df.index.tolist()
-
+    uncertain_indices = uncertain_matches.index.tolist()
+    
+    # Generamos satélites cambiando sistemáticamente los partidos más inciertos
     for i in range(num_satellites):
         satellite = core_quiniela.copy()
         
-        # Elegimos 1 o 2 partidos 'Divisor' al azar para cambiarlos
-        num_flips = random.randint(1, min(2, len(divisor_indices)))
-        indices_to_flip = random.sample(divisor_indices, num_flips)
+        # Usamos el operador de módulo para rotar a través de los partidos inciertos
+        index_to_flip = uncertain_indices[i % len(uncertain_indices)]
         
-        for index in indices_to_flip:
-            # Cambiamos el resultado al segundo más probable
-            satellite[index] = get_second_most_probable_result(df.loc[index])
-            
+        # Cambiamos el resultado al segundo más probable
+        satellite[index_to_flip] = get_second_most_probable_result(df.loc[index_to_flip])
+        
+        # Verificación para asegurar que no sea idéntico al core si hay suficientes partidos para cambiar
+        if satellite == core_quiniela and len(uncertain_indices) > i:
+             # Si por casualidad el primer satélite es igual al core, prueba con el siguiente partido incierto
+             next_index_to_flip = uncertain_indices[(i + 1) % len(uncertain_indices)]
+             satellite[next_index_to_flip] = get_second_most_probable_result(df.loc[next_index_to_flip])
+
         satellites.append(satellite)
         
     return satellites
 
-
 # --- Main App UI ---
 st.title("⚽ Generador de Portafolios para Progol")
-st.markdown("""
-Esta herramienta te ayuda a generar un portafolio de quinielas de Progol siguiendo la metodología **Core + Satélites**.
-1.  **Prepara tu CSV**: Asegúrate de que tu archivo `quiniela.csv` tenga las columnas `home, away, p_L, p_E, p_V`.
-2.  **Configura los parámetros**: Usa la barra lateral para definir cuántas quinielas quieres.
-3.  **Genera y descarga**: Haz clic en el botón para crear tu portafolio y descárgalo.
-""")
+st.markdown("Esta herramienta te ayuda a generar un portafolio de quinielas de Progol siguiendo la metodología **Core + Satélites**.")
 
 # --- Sidebar Controls ---
 st.sidebar.header("Parámetros del Portafolio")
 num_quinielas = st.sidebar.slider("Número total de quinielas a generar", 5, 30, 10)
 min_draws, max_draws = st.sidebar.slider(
-    "Rango de Empates por quiniela", 
+    "Rango de Empates por quiniela (Core)", 
     0, 14, 
     (MIN_DRAWS_PER_TICKET, MAX_DRAWS_PER_TICKET)
 )
@@ -135,50 +127,42 @@ if uploaded_file is None:
 # --- Main Logic ---
 try:
     df = pd.read_csv(uploaded_file)
-    # Data Validation
     required_cols = ['home', 'away', 'p_L', 'p_E', 'p_V']
     if not all(col in df.columns for col in required_cols):
         st.error(f"El archivo CSV debe contener las columnas: {', '.join(required_cols)}")
         st.stop()
-    if not np.allclose(df[['p_L', 'p_E', 'p_V']].sum(axis=1), 1.0):
+    if not np.allclose(df[['p_L', 'p_E', 'p_V']].sum(axis=1), 1.0, atol=0.01):
         st.warning("Algunas filas no suman 1.0. Las probabilidades serán normalizadas.")
         df[['p_L', 'p_E', 'p_V']] = df[['p_L', 'p_E', 'p_V']].div(df[['p_L', 'p_E', 'p_V']].sum(axis=1), axis=0)
 
-    # Calculate max probability and best result
     df['p_max'] = df[['p_L', 'p_E', 'p_V']].max(axis=1)
     df['result'] = df.apply(get_most_probable_result, axis=1)
-    
-    # Classify matches
     df = classify_matches(df)
     
     st.header("Análisis de Partidos")
     st.dataframe(df[['home', 'away', 'p_L', 'p_E', 'p_V', 'p_max', 'result', 'classification']])
 
     if st.button("🚀 Generar Portafolio de Quinielas", type="primary"):
-        # Generate Core Quiniela
         core_quiniela = generate_core_quiniela(df, min_draws, max_draws)
-        
-        # Generate Satellites
         num_satellites = num_quinielas - 1
         satellite_quinielas = generate_satellite_quinielas(df, core_quiniela, num_satellites)
-        
-        # Combine into final portfolio
         portfolio_list = [core_quiniela] + satellite_quinielas
         
-        # --- LÍNEA CORREGIDA ---
-        # Ahora el número de columnas se basa en el número de partidos en el archivo
-        num_matches = len(df)
-        portfolio_df = pd.DataFrame(
-            portfolio_list,
-            columns=[f"Partido {i+1}" for i in range(num_matches)], # <-- ESTA ES LA LÍNEA QUE CAMBIÓ
-            index=[f"Quiniela Core"] + [f"Satélite {i+1}" for i in range(num_satellites)]
-        )
+        # --- LÓGICA DE VISUALIZACIÓN CORREGIDA ---
+        # 1. Creamos un diccionario para el DataFrame
+        match_names = df.apply(lambda row: f"{row['home']} vs {row['away']}", axis=1).tolist()
+        quiniela_names = [f"Quiniela Core"] + [f"Satélite {i+1}" for i in range(num_satellites)]
+        
+        portfolio_dict = {name: data for name, data in zip(quiniela_names, portfolio_list)}
+        
+        # 2. Creamos el DataFrame con los partidos como índice
+        portfolio_df = pd.DataFrame(portfolio_dict, index=match_names)
         
         st.header("✅ Portafolio Generado")
         st.dataframe(portfolio_df)
         
-        # Add download button
-        csv_output = portfolio_df.to_csv(index=False).encode('utf-8')
+        # 3. Preparamos el CSV para descarga (con la orientación correcta)
+        csv_output = portfolio_df.to_csv().encode('utf-8')
         st.download_button(
             label="📥 Descargar Portafolio en CSV",
             data=csv_output,
@@ -188,3 +172,4 @@ try:
 
 except Exception as e:
     st.error(f"Ha ocurrido un error al procesar el archivo: {e}")
+    st.exception(e) # Muestra el detalle del error para depuración
