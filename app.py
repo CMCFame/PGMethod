@@ -43,8 +43,13 @@ def classify_matches(df):
     df['classification'] = np.select(conditions, ['Ancla', 'Divisor'], default='Neutro')
     return df
 
+# --- FUNCION CORREGIDA ---
 def get_most_probable_result(row):
-    return max({'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}, key=lambda k: row[k])
+    """Obtiene el resultado mas probable (L, E, V) de una fila de partido."""
+    probs = {'L': row['p_L'], 'E': row['p_E'], 'V': row['p_V']}
+    # La clave para la funcion max() debe ser el metodo .get del diccionario 'probs'.
+    # Esto le dice a max() que compare las LLAVES ('L','E','V') usando sus VALORES en el diccionario.
+    return max(probs, key=probs.get)
 
 def apply_draw_propensity_rule(df):
     for i, row in df.iterrows():
@@ -160,6 +165,7 @@ if uploaded_file is not None:
                 df_modelado = apply_draw_propensity_rule(df_modelado)
                 df_modelado = apply_global_regularization(df_modelado)
                 df_modelado = classify_matches(df_modelado)
+                # Aqu¨ª se llama a la funci¨®n corregida
                 df_modelado['result'] = df_modelado.apply(get_most_probable_result, axis=1)
             st.success("Reglas de modelado aplicadas.")
             st.write("Clasificacion de partidos para optimizacion:")
