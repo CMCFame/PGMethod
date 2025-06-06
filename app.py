@@ -29,7 +29,7 @@ def get_matches_from_image_with_ocr(image_bytes, api_key):
         client = OpenAI(api_key=api_key)
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         response = client.chat.completions.create(
-            model="o4-mini-2025-04-16", # --- MODELO ACTUALIZADO ---
+            model="o4-mini-2025-04-16",
             messages=[
                 {
                     "role": "user",
@@ -49,7 +49,7 @@ def get_matches_from_image_with_ocr(image_bytes, api_key):
                     ]
                 }
             ],
-            max_tokens=2000,
+            max_completion_tokens=2000, # --- PARÁMETRO CORREGIDO ---
         )
         json_string = response.choices[0].message.content.strip().replace("```json", "").replace("```", "")
         return json.loads(json_string)
