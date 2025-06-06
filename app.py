@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,22 +8,20 @@ import math
 # --- Configuracion de la App ---
 st.set_page_config(page_title="Progol Optimizer Pro (Definitive)", page_icon="??", layout="wide")
 st.title("?? Progol Optimizer Pro (Version Definitiva)")
-st.markdown("Una implementacion completa de la **Metodologia Definitiva Progol**, incluyendo todas las reglas de validacion y optimizacion estrategica.")
+st.markdown("Una implementacion completa de la **Metodologia Definitiva Progol**, incluyendo optimizacion multi-objetivo de **Probabilidad y Diversidad**.")
 
 # --- CONSTANTES DE LA METODOLOGIA ---
 NUM_MATCHES_PROGOL = 14
 L_COUNT_RANGE = (round(0.35 * NUM_MATCHES_PROGOL), round(0.41 * NUM_MATCHES_PROGOL)) # 5-6
 E_COUNT_RANGE = (4, 6) # Regla explicita
 V_COUNT_RANGE = (round(0.30 * NUM_MATCHES_PROGOL), round(0.36 * NUM_MATCHES_PROGOL)) # 4-5
-CONCENTRATION_LIMIT = 0.70 # Limite de concentracion para un solo signo
+CONCENTRATION_LIMIT = 0.70
 
-# Reglas de modelado
 DRAW_PROPENSITY_THRESHOLD = 0.08
 L_SUM_RANGE = (5.0, 5.8); E_SUM_RANGE = (3.5, 4.6); V_SUM_RANGE = (4.2, 5.2)
 
 # --- FUNCION DE CARGA DE CSV MEJORADA ---
 def load_csv_with_encoding_fallbacks(uploaded_file):
-    """Intenta leer un CSV con diferentes codificaciones para evitar errores."""
     try:
         return pd.read_csv(uploaded_file)
     except UnicodeDecodeError:
@@ -70,10 +69,17 @@ def run_montecarlo_simulation(quiniela_tuple, probabilities_tuple, num_simulatio
     hits = np.sum(random_outcomes == quiniela_indices, axis=1)
     return np.sum(hits >= 11) / num_simulations
 
-def calculate_portfolio_objective(portfolio, probabilities_tuple, num_simulations):
-    if not portfolio: return 0
-    probs_win = [run_montecarlo_simulation(tuple(q), probabilities_tuple, num_simulations) for q in portfolio]
-    return 1 - np.prod([(1 - p) for p in probs_win])
+def calculate_portfolio_diversity_score(portfolio):
+    if not portfolio: return 1.0
+    portfolio_by_match = list(zip(*portfolio))
+    avg_unique_signs = np.mean([len(set(match_results)) for match_results in portfolio_by_match])
+    return (avg_unique_signs - 1) / 2
+
+def calculate_portfolio_energy(portfolio, probabilities_tuple, num_simulations, diversity_weight):
+    prob_energy = 1 - np.prod([(1 - run_montecarlo_simulation(tuple(q), probabilities_tuple, num_simulations)) for q in portfolio])
+    diversity_energy = calculate_portfolio_diversity_score(portfolio)
+    combined_energy = prob_energy * (1 - diversity_weight) + diversity_energy * diversity_weight
+    return combined_energy, prob_energy, diversity_energy
 
 def is_valid_quiniela(quiniela):
     num_matches = len(quiniela)
@@ -116,22 +122,22 @@ def get_neighbor_portfolio(portfolio, df):
         if is_valid_quiniela(new_q): new_portfolio[q_idx] = new_q; return new_portfolio
     return portfolio
 
-def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations):
+def run_simulated_annealing(df, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations, diversity_weight):
     probabilities_tuple = tuple(map(tuple, df[['p_L', 'p_E', 'p_V']].values))
     current_portfolio = create_initial_portfolio(df, num_quinielas)
-    current_energy = calculate_portfolio_objective(current_portfolio, probabilities_tuple, num_simulations)
+    current_energy, _, _ = calculate_portfolio_energy(current_portfolio, probabilities_tuple, num_simulations, diversity_weight)
     best_portfolio, best_energy = current_portfolio, current_energy; temp = initial_temp
     progress_bar = st.progress(0, text="Iniciando optimizacion...")
     for i in range(iterations):
         neighbor_portfolio = get_neighbor_portfolio(current_portfolio, df)
-        neighbor_energy = calculate_portfolio_objective(neighbor_portfolio, probabilities_tuple, num_simulations)
+        neighbor_energy, prob_e, div_e = calculate_portfolio_energy(neighbor_portfolio, probabilities_tuple, num_simulations, diversity_weight)
         delta_energy = neighbor_energy - current_energy
         if delta_energy > 0 or np.random.rand() < math.exp(delta_energy / temp):
             current_portfolio, current_energy = neighbor_portfolio, neighbor_energy
         if current_energy > best_energy:
             best_portfolio, best_energy = current_portfolio, current_energy
         temp *= cooling_rate
-        progress_bar.progress((i + 1) / iterations, text=f"Iteracion {i+1}/{iterations} | Score: {best_energy:.4f}")
+        progress_bar.progress((i + 1) / iterations, text=f"Iter. {i+1} | Score: {best_energy:.4f} (P: {prob_e:.3f}, D: {div_e:.3f})")
     st.success("?Optimizacion completada!")
     return best_portfolio
 
@@ -140,14 +146,13 @@ st.sidebar.header("Paso 1: Cargar Datos")
 uploaded_file = st.sidebar.file_uploader("Sube tu CSV con partidos y probabilidades", type=["csv"])
 
 if uploaded_file is not None:
-    df = load_csv_with_encoding_fallbacks(uploaded_file)
-    
-    if df is not None:
-        st.header("1. Datos Cargados")
-        st.dataframe(df)
-
+    df_input = load_csv_with_encoding_fallbacks(uploaded_file)
+    if df_input is not None:
+        st.header("1. Datos de Entrada"); st.dataframe(df_input)
         st.sidebar.header("Paso 2: Parametros de Optimizacion")
         num_quinielas = st.sidebar.slider("Numero de quinielas", 5, 30, 15)
+        diversity_weight = st.sidebar.slider("Peso de la Diversificacion", 0.0, 1.0, 0.4, 0.05, help="0=Solo probabilidad, 1=Solo diversidad. Un valor de 0.2 a 0.5 es recomendado.")
+        st.sidebar.subheader("Configuracion Avanzada")
         iterations = st.sidebar.select_slider("Iteraciones del optimizador", options=[500, 1000, 2000, 5000], value=1000)
         initial_temp = st.sidebar.slider("Temperatura inicial", 0.1, 1.0, 0.5, 0.05)
         cooling_rate = st.sidebar.select_slider("Tasa de enfriamiento", options=[0.99, 0.995, 0.999], value=0.995)
@@ -156,16 +161,15 @@ if uploaded_file is not None:
         if st.sidebar.button("?? Iniciar Optimizacion Definitiva", type="primary"):
             st.header("2. Proceso de Optimizacion")
             with st.spinner("Aplicando reglas de modelado heuristico..."):
-                df_modelado = df.copy()
+                df_modelado = df_input.copy()
                 df_modelado = apply_draw_propensity_rule(df_modelado)
                 df_modelado = apply_global_regularization(df_modelado)
                 df_modelado = classify_matches(df_modelado)
                 df_modelado['result'] = df_modelado.apply(get_most_probable_result, axis=1)
             st.success("Reglas de modelado aplicadas.")
-            st.write("Clasificacion de partidos para optimizacion:")
-            st.dataframe(df_modelado[['home', 'away', 'classification', 'p_max']])
+            st.write("Clasificacion de partidos para optimizacion:"); st.dataframe(df_modelado[['home', 'away', 'classification', 'p_max']])
 
-            final_portfolio = run_simulated_annealing(df_modelado, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations)
+            final_portfolio = run_simulated_annealing(df_modelado, num_quinielas, num_simulations, initial_temp, cooling_rate, iterations, diversity_weight)
             
             st.header("3. Portafolio Optimo Encontrado")
             probabilities_tuple = tuple(map(tuple, df_modelado[['p_L', 'p_E', 'p_V']].values))
